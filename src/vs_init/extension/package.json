@@ -1,0 +1,35 @@
+{
+  "name": "vs-init-action",
+  "displayName": "VertiGIS Studio",
+  "description": "Manage a VertiGIS Studio Docker deployment from VS Code.",
+  "version": "0.14.1",
+  "publisher": "vertigis-studio",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "main": "./extension.js",
+  "extensionKind": ["ui"],
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "vsInit",
+          "title": "VertiGIS Studio",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "vsInit": [
+        {
+          "type": "webview",
+          "id": "vsInit.mainView",
+          "name": "VertiGIS Studio",
+          "when": "vsInit.looksLikeOurs"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,32 @@
+services:
+  studio:
+    image: ghcr.io/vertigis/studio/base:latest
+    restart: unless-stopped
+    environment:
+      ARCGIS_APP_ID: # VertiGIS Studio
+      ARCGIS_PORTAL_URL: https://www.arcgis.com
+      VERTIGIS_ACCOUNT_ID:
+      FRONTEND_URL: # caddy route url
+      VERTIGIS_PURGE: 1
+      VERTIGIS_WORKERS: 8
+    volumes:
+      - /opt/vertigis-studio/certs/root:/etc/ssl/certs:ro
+      - data:/data
+      - logs:/var/log
+      - temp:/stmp
+    networks:
+      caddy:
+        aliases:
+          - studio.studio-1.int # caddy route target:8080
+      default: {}
+
+networks:
+  default: {}
+  caddy:
+    name: caddy
+    external: true
+
+volumes:
+  data: {}
+  logs: {}
+  temp: {}

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <title>VertiGIS Studio favicon — vector reconstruction</title>
+
+  <!-- Left and right facets -->
+  <path fill="#128943"
+        d="M0 0h11.35
+           C9.55 1.85 8.05 3.95 6.85 6.15
+           L4.55 10.95
+           Z"/>
+
+  <path fill="#128943"
+        d="M32 0H20.65
+           C22.45 1.85 23.95 3.95 25.15 6.15
+           L27.45 10.95
+           Z"/>
+
+  <!-- Main location-pin body, with a true transparent circular cutout -->
+  <path fill="#128943" fill-rule="evenodd"
+        d="M16 2
+           C10.95 2 7.45 6.05 7.45 11.15
+           C7.45 17.75 11.9 23.55 16 31.35
+           C20.1 23.55 24.55 17.75 24.55 11.15
+           C24.55 6.05 21.05 2 16 2
+           Z
+
+           M16 5.05
+           A6.25 6.25 0 1 0 16 17.55
+           A6.25 6.25 0 1 0 16 5.05
+           Z"/>
+
+  <!-- Center disc -->
+  <circle cx="16" cy="11.3" r="3.95" fill="#128943"/>
+</svg>

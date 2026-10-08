@@ -1,0 +1,36 @@
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+    volumes:
+      - data:/data
+      - config:/config
+      - /opt/vertigis-studio/certs/live:/opt/vertigis-studio/certs/live:ro
+      - /opt/vertigis-studio/certs/root:/etc/ssl/certs:ro
+    networks:
+      - default
+      - caddy
+
+configs:
+  caddyfile:
+    content: |
+      localhost:80 {
+        respond "Hello from Caddy"
+      }
+
+volumes:
+  data: {}
+  config: {}
+
+networks:
+  default: {}
+  caddy:
+    name: caddy
+    internal: true

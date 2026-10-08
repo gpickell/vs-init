@@ -1,0 +1,20 @@
+[project]
+name = "vs-init"
+version = "0.1.0"
+description = "Provision a Windows machine for remote Linux admin work (VertiGIS Studio Docker deployments)."
+readme = "README.md"
+authors = [
+    { name = "Garth Pickell", email = "garth.gpickell@vertigis.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "questionary>=2.0",
+    "sshconf>=0.2",
+]
+
+[project.scripts]
+vs-init = "vs_init.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
