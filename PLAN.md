@@ -76,6 +76,8 @@ Flow:
       - Write .vscode/settings.json
         - Use Abyss theme
 - Launch code but target remote system at the correct folder.
+- Right after launching, create a per-profile launcher (shortcut.py, DONE) so this deployment can
+  be reopened later without rerunning vs-init -- see "Note: Per-profile launcher shortcut" below.
 
 ## Extension: VertiGIS Studio
 
@@ -93,8 +95,26 @@ UI:
     - pin network name so we can talk to counterparts
   - Button: Add Studio (studio-1, studio-2, ...)
     - best guess place holder for now
+  - Button: Guidance (DONE) -- opens the Guidance screen (below), or re-reveals it if already open
   - Section: Projects
     - click fast links (folder name -> open compose.yml fie)
+- Guidance screen (DONE): a WebviewPanel (opens in the editor, not the sidebar -- there's enough
+  content here to need real width, and it's read once up front then occasionally referred back to,
+  not something that should compete with the side panel's own project list). Written for the
+  audience the Motivation section itself names -- Windows Enterprise admins, not Linux people --
+  spelling out in plain language what Remote-SSH/projects/compose.yml actually are, then walking
+  through every CodeLens action (what it's for, what to expect when you click it, e.g. "may prompt
+  for administrator approval," "may need Retrieve Cert run afterward"), then a roughly-ordered
+  checklist for setting up a brand new deployment. Auto-opens once per window the first time the
+  folder is recognized (vsInit.looksLikeOurs), unless the workspace's own vsInit.hideWelcome
+  setting says not to -- a checkbox at the bottom of the screen itself sets that (at Workspace
+  scope, via vscode.workspace.getConfiguration("vsInit").update(..., ConfigurationTarget.Workspace)
+  -- so it's persisted into that workspace's own settings.json, not global VS Code settings). The
+  Guidance button always reopens it regardless of that setting. provision.sh's own
+  .vscode/settings.json write (previously just the Abyss theme) now includes
+  "vsInit.hideWelcome": false by default, so the setting already exists (defaulted to "show it")
+  from the moment a workspace is first provisioned, declared as a real contributed setting in
+  package.json rather than just an ad hoc read/write.
 - compose.yml Code Lens
   - Cue: any "# caddy" comment, anywhere in the file -- OR the file structurally looks like a
     caddy project's own compose.yml (a caddy image, plus an inline "content: |" config block --
@@ -213,7 +233,10 @@ Flow:
     hard kill if that fails) -- we do not want crash prompts
 - Use the token:
   - Register arc: resolve the signed-in username (community/self), create an Application item
-    (content/users/<user>/addItem, title = project folder name as a placeholder), then
+    (content/users/<user>/addItem, title = the ARCGIS_APP_ID line's own trailing comment, e.g.
+    "# VertiGIS Studio" -- that's what a user actually sees on the portal's OAuth consent screen,
+    so it's a better title than an internal folder name; falls back to the project folder name only
+    if that comment is missing or empty), then
     oauth2/registerApp with the front end URL as the sole redirect_uri
   - Update arc: oauth2/apps/<id>/update, refreshing the redirect_uri to the current FRONTEND_URL
   - Portal REST call shapes ported from vss-prime's agolregister.py; confirmed working against a
@@ -393,12 +416,154 @@ Flow:
 - The script sets $ErrorActionPreference = 'Stop' and wraps its whole body in try/catch, reporting
   any caught exception via its own plain "VS_INIT_CNAME_ERROR: ..." Write-Output marker (the Get
   keeps its own -ErrorAction SilentlyContinue override -- "not found yet" there is expected, not a
-  failure). This isn't just tidiness: PowerShell's non-interactive host (which this always is,
-  spawned and piped) serializes anything that lands on the Error/Warning/Verbose/Debug streams as
-  CLIXML instead of plain text -- confirmed as the source of "weird" garbled captured output.
-  Write-Output (the success/pipeline stream) never gets that treatment, and there is no flag to
-  turn CLIXML off for the other streams -- routing every failure through Write-Output instead is
-  what actually avoids it.
+  failure). This exists as a second, independent layer of defense against CLIXML on top of
+  runPowerShellScript's own generic wrapping (below) -- it's what actually produces the
+  VS_INIT_CNAME_* markers registerCname's own logic depends on, not just a CLIXML workaround on
+  its own.
+- Every PowerShell invocation through captureOnSystem goes through a shared runPowerShellScript()
+  helper (extension.js) rather than each script reinventing CLIXML avoidance. Root cause was
+  isolated empirically by reproducing it through the exact real spawn chain, varying one thing at
+  a time: a direct spawn of powershell.exe and a gsudo-wrapped spawn both stayed perfectly clean
+  using -File; switching only the invocation mode to -EncodedCommand (what the real code uses, for
+  the quoting-corruption reasons above) reproduced the "#< CLIXML" blob immediately and reliably.
+  So the trigger is specifically -EncodedCommand combined with piped, console-less stdio -- not
+  gsudo, not elevation, not -NonInteractive alone. Two things fix it, confirmed by reproducing a
+  real non-terminating error and a real warning through gsudo + -EncodedCommand and verifying zero
+  CLIXML in the result:
+  - `& { <script> } *>&1 | Out-String -Width 4096` -- *>&1 redirects every numbered stream
+    (Success/Error/Warning/Verbose/Debug/Information) into the success stream, and Out-String
+    forces it all through PowerShell's own formatting *inside the process* before anything crosses
+    the OS pipe boundary, so there's nothing left for the non-interactive host to serialize.
+    -Width is pinned high defensively against Out-String wrapping a long single-line message --
+    confirmed NOT to happen by default in this exact invocation shape even at 2000 characters, but
+    cheap enough to guard explicitly rather than rely on an undocumented default.
+  - $ProgressPreference = 'SilentlyContinue' -- Progress isn't one of the numbered streams *>&1
+    covers (it has no redirect number at all; it's a separate host callback), so without this, a
+    one-time "Preparing modules for first use" message (first module auto-load in a session) still
+    showed up as its own separate CLIXML blob even with the *>&1 | Out-String wrap in place --
+    reproduced, then confirmed this line removes it.
+  Validated end-to-end with the real buildCnameUpsertScript output (pointed at a nonexistent DNS
+  server to force a genuine DnsServer-module/CIM failure) through the real gsudo +
+  -EncodedCommand chain: clean "VS_INIT_CNAME_ERROR: ..." text, zero CLIXML.
+- Every PowerShell invocation through captureOnSystem goes through a shared runPowerShellScript()
+  helper now, not just this one script -- see "Note: PowerShell output" below.
+
+### Action: Pick Version (DONE)
+
+Cue: any "image:" mapping with a value, anchored right on that line (not top-pinned like Build
+Caddyfile/Transfer Enterprise Trust Anchors -- this is genuinely per-image, and a file could have
+more than one service each with its own image: line).
+
+Lets the user pick a new tag for that image straight from the real registry's own tag list -- no
+local guessing about what versions exist. Queried live against both ghcr.io/vertigis/studio/base
+and docker.io/library/caddy during design; findings below are from those real responses, not
+hypothetical ones.
+
+Flow:
+- Parse the image reference (parseImageRef) into {registry, repository, name, tag}. No registry
+  prefix defaults to docker.io, and an unqualified name (e.g. "caddy") gets Docker Hub's implicit
+  "library/" namespace ("library/caddy") -- but `name` (what's used for the actual write-back) is
+  kept as the exact original substring before the tag, never reconstructed from registry+
+  repository, so picking a new tag for "caddy:2" writes back "caddy:<new>", never
+  "docker.io/library/caddy:<new>" just because that's technically what it resolves to.
+- Fetch every tag via the plain OCI Distribution Spec anonymous-pull flow -- confirmed working
+  with zero credentials against both registries: GET /v2/<repo>/tags/list unauthenticated -> 401
+  with a WWW-Authenticate: Bearer realm="...",service="...",scope="..." header -> GET that realm
+  (passing its own service+scope straight through, not reconstructed/guessed) -> anonymous bearer
+  token -> retry the original GET with it -> {"tags": [...]}. registryApiHost() translates
+  "docker.io" (the conventional registry identifier used in image references, and what's shown to
+  the user) to the actual API host, registry-1.docker.io, before making any request -- a real bug
+  caught live: hitting docker.io directly returns Docker Hub's web UI (an HTML page, "<!DOCTYPE
+  ..."), not a JSON 401 challenge, which surfaced as "Unexpected token '<' ... is not valid JSON"
+  the first time this ran against caddy. Every other registry (ghcr.io included) uses the same host
+  for both purposes, so this is a one-off translation, not a general pattern.
+- Sanitize the raw tag list before presenting it (cleanVersionTags): confirmed the two registries
+  behave completely differently here. GHCR returns tags in genuine chronological/creation order
+  (confirmed: not lexical, but monotonically increasing by real version) -- the newest real tag is
+  just whatever's last. Docker Hub returns tags in plain lexical string order (confirmed) -- which
+  is actively wrong for version recency once double digits show up (e.g. "2.10.0" sorts before
+  "2.2.0" as strings; the real caddy tag list's lexical order puts 2.10.x/2.11.x, its actually-
+  newest releases, before 2.2.0 through 2.9.1). So tags are never trusted to already be in a useful
+  order from either registry -- always re-sorted ourselves:
+  - tokenizeTag: split into alternating digit/non-digit runs (e.g. "v1.1.1184.377622" ->
+    ["v","1",".","1",".","1184",".","377622"]).
+  - tagVersionKey: the digit runs only, parsed as BigInt, compared component-by-component
+    (compareTagVersions) as actual numbers -- not strings -- with a missing trailing component
+    treated as 0 (so "2" sorts as equivalent to "2.0.0" relative to "2.11.7"). This is what fixes
+    the "2.10.0" vs "2.2.0" lexical trap.
+  - isFlavoredTag: excludes platform/variant noise (confirmed against Docker Hub's real 606-tag
+    list for caddy: "2-alpine", "2-builder-windowsservercore-ltsc2022", "nanoserver-ltsc2022", "2-
+    nanoserver", etc.) while keeping genuine version tags, including GHCR's own real shape
+    ("v1.1.598.224400-r13470513045" -- a build-id suffix, not a flavor). Rule: tokenize, and every
+    non-digit run must be "trivial" to not count as flavor text -- strip any leading punctuation
+    from the run, and at most one letter can remain. A bare separator ("." or "-") strips to
+    nothing (trivial); a leading version-prefix letter like "v" is already just one letter
+    (trivial); a build-id marker like "-r" strips to "r" (trivial). Genuine flavor text ("-alpine",
+    "-builder-windowsservercore-ltsc", leading "nanoserver-ltsc") is always more than one letter
+    after stripping, so it's still caught -- regardless of whether it sits before, between, or
+    after the tag's numeric runs, with no separate leading/internal/trailing cases needed. A first
+    version of this rule only exempted a single leading character specifically (not "any single
+    letter anywhere"), which wrongly flagged GHCR's own "-r<buildid>" shape as flavored -- caught
+    by testing against the real 46-tag list (only 8 survived instead of 46), not just hand-picked
+    examples.
+  - "latest" is excluded from this sanitizing/sorting pipeline entirely (it has no digits to
+    compare by anyway) and instead hard-pinned back in as the first choice unconditionally --
+    always offered regardless of whether the registry's own list would otherwise produce it in a
+    form that survives the filter.
+- Show the result (latest first, then every real version newest-first) in a QuickPick; write the
+  picked tag back by replacing just the value on that one image: line (same quote-preserving,
+  comment-preserving replaceLineValue() every other inflight edit in this extension uses).
+
+### Note: PowerShell output
+
+Every PowerShell invocation through captureOnSystem goes through a shared runPowerShellScript()
+helper (extension.js) now, rather than each script reinventing CLIXML avoidance -- see Register
+CNAME's own section above for the full empirical story (root cause isolated to -EncodedCommand
+specifically, the two-part fix, and the Progress-stream edge case). Any future PowerShell-based
+action should run its script through this helper rather than building its own -EncodedCommand
+invocation by hand.
+
+### Note: Per-profile launcher shortcut
+
+shortcut.py (DONE): right before (really, right after) launching VS Code for a freshly-provisioned
+profile, cli.py calls shortcut.ensure_shortcut(profile, code, folder) to leave behind a way to get
+back into that same deployment later without rerunning the whole vs-init flow. Two files, each
+doing a job the other can't:
+
+- A `vs-init-<profile>.cmd` shim written into `%LocalAppData%\Microsoft\WindowsApps` -- that folder
+  is on every user's PATH by default (confirmed earlier: no admin, no PATH edit needed), so typing
+  `vs-init-<profile>` in any shell runs `code --remote ssh-remote+<profile> <folder>
+  --disable-workspace-trust` directly, no re-provisioning.
+- A `.lnk` under the per-user Start Menu, at `VertiGIS Studio\Deployment\VertiGIS Studio Deployment
+  - <profile>.lnk`, created via `New-Object -ComObject WScript.Shell` through a plain
+  (non-`-EncodedCommand`) `powershell -Command` call -- no CLIXML concerns here, that was specific
+  to `-EncodedCommand` (see "Note: PowerShell output"). Its TargetPath points at the `.cmd` above
+  (one source of truth for the actual launch command) and its IconLocation points at an icon copied
+  into `~/.vs-init/studio.ico` (copied once from a bundled asset, `assets/studio.ico` -- lifted from
+  apps.vertigisstudio.com/favicon.ico and vendored rather than fetched live, so setup has no network
+  dependency on that site staying put). The brand name is duplicated into the filename itself, not
+  just the containing folder -- confirmed empirically that Start's search matches against an item's
+  own filename, not the folder path it lives in, so a `.lnk` literally named `<profile>.lnk` inside
+  `VertiGIS Studio\Deployment\` is only findable by typing the bare profile name, never "VertiGIS".
+
+Why both files, empirically confirmed live in this same session before writing any of this code:
+- A bare `.cmd`/`.exe` dropped straight into a Start Menu folder (even a fresh subfolder, even after
+  force-restarting `StartMenuExperienceHost.exe` to rule out caching) is invisible to modern Windows
+  11 Start -- not in search, not even when just browsing "All apps". Only real `.lnk` files are
+  picked up. So WindowsApps alone gives typed-command convenience but zero Start discoverability;
+  a `.lnk` alone gives discoverability but no custom icon without a `.lnk` (raw scripts only ever
+  get the generic file-association icon) and isn't on PATH. Doing both covers both cases from one
+  `ensure_shortcut()` call.
+- Two levels of Start Menu nesting (`VertiGIS Studio\Deployment\`) works fine -- confirmed live,
+  same as the one-level case tested earlier.
+- `.lnk` files do carry their own icon (`IconLocation`, a `"path,index"` pair, independent of the
+  target's own icon) and their own argument list (`Arguments`), which is what actually makes this
+  work at all -- a bare script can't carry a custom icon, and `Set-Alias`-style aliasing (considered
+  and rejected earlier) can't carry arguments.
+
+Filenames are derived from the profile name with `_INVALID_FILENAME_CHARS` subbing out
+`\/:*?"<>|` -- profile names are free-form text from `sshprofile.py`'s prompt, not guaranteed to be
+filesystem-safe on their own.
 
 ### Note: gsudo
 

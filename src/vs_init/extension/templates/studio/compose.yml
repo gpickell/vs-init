@@ -3,10 +3,12 @@ services:
     image: ghcr.io/vertigis/studio/base:latest
     restart: unless-stopped
     environment:
-      ARCGIS_APP_ID: # VertiGIS Studio
+      # Comment will be the title of the item in your portal.
+      ARCGIS_APP_ID: your_app_id # VertiGIS Studio
       ARCGIS_PORTAL_URL: https://www.arcgis.com
-      VERTIGIS_ACCOUNT_ID:
-      FRONTEND_URL: # caddy route url
+      VERTIGIS_ACCOUNT_ID: your_account_id
+      # Keep comment as is for Caddy tooling.
+      FRONTEND_URL: https://your-studio.contoso.com/path # caddy route url
       VERTIGIS_PURGE: 1
       VERTIGIS_WORKERS: 8
     volumes:
@@ -15,10 +17,10 @@ services:
       - logs:/var/log
       - temp:/stmp
     networks:
+      default: {}
       caddy:
         aliases:
           - studio.studio-1.int # caddy route target:8080
-      default: {}
 
 networks:
   default: {}

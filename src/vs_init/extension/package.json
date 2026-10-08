@@ -2,7 +2,7 @@
   "name": "vs-init-action",
   "displayName": "VertiGIS Studio",
   "description": "Manage a VertiGIS Studio Docker deployment from VS Code.",
-  "version": "0.14.1",
+  "version": "0.18.0",
   "publisher": "vertigis-studio",
   "engines": {
     "vscode": "^1.85.0"
@@ -30,6 +30,16 @@
           "when": "vsInit.looksLikeOurs"
         }
       ]
+    },
+    "configuration": {
+      "title": "VertiGIS Studio",
+      "properties": {
+        "vsInit.hideWelcome": {
+          "type": "boolean",
+          "default": false,
+          "description": "Don't automatically open the Guidance screen when this workspace is recognized as a VertiGIS Studio deployment. The Guidance button in the side panel always reopens it regardless of this setting."
+        }
+      }
     }
   }
 }

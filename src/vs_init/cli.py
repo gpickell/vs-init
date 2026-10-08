@@ -8,7 +8,7 @@ from typing import Optional
 
 import questionary
 
-from . import dnstools, provision, settings, sshinstall, sshkey, sshprofile, vscode, winsudo
+from . import dnstools, provision, settings, shortcut, sshinstall, sshkey, sshprofile, vscode, winsudo
 
 _BANNER = """\
 vs-init provisions this Windows machine to do remote Linux admin work
@@ -193,6 +193,19 @@ def _launch_vscode_remote(profile: Optional[str]) -> None:
         print(f"Launching VS Code (Remote-SSH) failed: {exc}")
         return
     print("Launched VS Code (Remote-SSH).")
+
+    code = vscode.find_code()
+    if not code:
+        return
+    try:
+        shortcut.ensure_shortcut(profile, code, provision.STUDIO_PATH)
+    except (RuntimeError, OSError) as exc:
+        print(f"Creating a reusable shortcut failed: {exc}")
+        return
+    print(
+        f'You can come back to this deployment later by searching the Start Menu for '
+        f'"VertiGIS Studio Deployment - {profile}", or by typing vs-init-{profile} in a terminal.'
+    )
 
 
 def main() -> None:

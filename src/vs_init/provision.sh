@@ -82,7 +82,8 @@ if [ "$FORCE" = 1 ] || ! studio_ready; then
     echo "Writing $STUDIO_PATH/.vscode/settings.json (Abyss theme)..."
     printf '%s\n' \
         '{' \
-        '    "workbench.colorTheme": "Abyss"' \
+        '    "workbench.colorTheme": "Abyss",' \
+        '    "vsInit.hideWelcome": false' \
         '}' | sudo tee "$STUDIO_PATH/.vscode/settings.json" >/dev/null
     sudo chown -R ":docker" "$STUDIO_PATH/.vscode"
     sudo chmod g+w "$STUDIO_PATH/.vscode" "$STUDIO_PATH/.vscode/settings.json"

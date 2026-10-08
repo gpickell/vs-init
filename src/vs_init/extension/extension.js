@@ -566,7 +566,13 @@ function environmentBlockValues(lines, envIndex) {
  * Cert, and Register CNAME always show once a block qualifies -- none
  * of the four are gated on any prior state (see each action's own
  * comment for why); Update App is the one exception, showing
- * additionally only once ARCGIS_APP_ID has a value. */
+ * additionally only once ARCGIS_APP_ID has a value.
+ *
+ * Pick Version is simpler still: any "image:" mapping with a value at
+ * all gets its own lens, right on that line (not top-pinned -- it's
+ * genuinely per-image, and a file could have more than one service each
+ * with its own image: line). No further condition -- every image
+ * reference is a valid candidate to look up tags for. */
 function findLensSpecs(lines) {
   const specs = [];
   let hasCaddyCue = false;
@@ -577,6 +583,8 @@ function findLensSpecs(lines) {
       hasCaddyCue = true;
     } else if (/^\s*-\s*\/opt\/vertigis-studio\/certs\/root:\/etc\/ssl\/certs:ro\s*$/.test(text)) {
       hasTrustAnchorsCue = true;
+    } else if (/^\s*image\s*:\s*\S/.test(text)) {
+      specs.push({ line, title: "Pick Version", kind: "pickVersion" });
     } else if (/^\s*environment\s*:\s*$/.test(text)) {
       const values = environmentBlockValues(lines, line);
       const isOurs = "VERTIGIS_ACCOUNT_ID" in values && "FRONTEND_URL" in values && "ARCGIS_PORTAL_URL" in values;
@@ -620,6 +628,16 @@ function findLensSpecs(lines) {
 function splitComment(line) {
   const match = line.match(/^(.*?)(\s+#.*)?$/);
   return { payload: match[1], comment: match[2] || "" };
+}
+
+/** Pure. The trailing "# ..." comment's own text, with the leading "#"
+ * and surrounding whitespace stripped -- e.g. " # VertiGIS Studio" ->
+ * "VertiGIS Studio". Null if there's no comment, or it's empty once
+ * stripped. */
+function lineCommentText(line) {
+  const { comment } = splitComment(line);
+  const text = comment.replace(/^\s*#\s*/, "").trim();
+  return text || null;
 }
 
 /** Pure. Splits a (comment-stripped) line into its structural prefix
@@ -924,7 +942,16 @@ function registerOrUpdateApp(folderUri, kind) {
       await updateOAuthApp(portalUrl, token, existingAppId, [frontendUrl]);
       appId = existingAppId;
     } else {
-      const title = folderUri.path.split("/").filter(Boolean).pop() || "VertiGIS Studio";
+      // The template's own "# VertiGIS Studio"-style comment on
+      // ARCGIS_APP_ID is what a user actually sees on the portal's
+      // OAuth consent screen, so it's a much better title than the
+      // project folder name -- falls back to the folder name only if
+      // that comment is missing or empty.
+      const appIdLineIndex = lines.findIndex((line) => /^\s*ARCGIS_APP_ID\s*:/.test(line));
+      const title =
+        (appIdLineIndex !== -1 && lineCommentText(lines[appIdLineIndex])) ||
+        folderUri.path.split("/").filter(Boolean).pop() ||
+        "VertiGIS Studio";
       const itemId = await addApplicationItem(portalUrl, token, username, title);
       executor.writeLine(`Created Application item ${itemId}; registering OAuth info...`);
       const info = await registerOAuthApp(portalUrl, token, itemId, [frontendUrl]);
@@ -1447,6 +1474,49 @@ function encodePowerShellCommand(script) {
   return Buffer.from(script, "utf16le").toString("base64");
 }
 
+/** Runs a PowerShell script via captureOnSystem, wrapped so its output
+ * never reaches PowerShell's CLIXML serialization path. Confirmed
+ * empirically (reproduced through the exact real spawn chain: gsudo +
+ * -EncodedCommand + piped, console-less stdio) that the trigger is
+ * specifically -EncodedCommand -- a direct spawn and a gsudo-wrapped
+ * spawn both stayed perfectly clean using -File; switching only the
+ * invocation mode to -EncodedCommand reproduced the "#< CLIXML" blob
+ * immediately. Two things fix it, both needed:
+ *   - `& { <script> } *>&1 | Out-String` -- *>&1 redirects every
+ *     numbered stream (Success/Error/Warning/Verbose/Debug/Information)
+ *     into the success stream, and Out-String forces it all through
+ *     PowerShell's own formatting *inside the process* before anything
+ *     crosses the OS pipe boundary -- so there's nothing left for the
+ *     non-interactive host to serialize. -Width is pinned high as a
+ *     defensive measure against Out-String wrapping a long single-line
+ *     message (confirmed NOT to happen by default in this exact
+ *     console-less invocation shape, even at 2000 characters -- but
+ *     cheap enough to guard explicitly rather than rely on an
+ *     undocumented default).
+ *   - $ProgressPreference = 'SilentlyContinue' -- Progress is NOT one
+ *     of the numbered streams *>&1 covers (it has no redirect number at
+ *     all; it's a separate host callback), so without this, a one-time
+ *     "Preparing modules for first use" progress message (first module
+ *     auto-load in a session) still shows up as its own separate
+ *     "#< CLIXML" blob even with the *>&1 | Out-String wrap in place --
+ *     confirmed by reproducing it, then confirming this line removes it.
+ *
+ * This is the one place any future PowerShell-based action should run
+ * its script through, rather than reinventing this wrapping per
+ * script -- certutil/certreq calls elsewhere don't go through here at
+ * all (they're not PowerShell), so this only ever affects actual
+ * PowerShell invocations. */
+function runPowerShellScript(executor, script, { gsudo = false } = {}) {
+  const wrapped = [`$ProgressPreference = 'SilentlyContinue'`, `& {`, script, `} *>&1 | Out-String -Width 4096`].join(
+    "\n"
+  );
+  return executor.captureOnSystem({
+    gsudo,
+    command: "powershell.exe",
+    args: ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodePowerShellCommand(wrapped)],
+  });
+}
+
 /** "Pings" a candidate name server by asking it directly (not the
  * system's default resolver) to resolve the zone's own NS records again
  * -- Node's dns.Resolver can direct a query at a specific server rather
@@ -1607,11 +1677,7 @@ function registerCname(folderUri) {
     const script = buildCnameUpsertScript({ zone, name, target, computerName: dcHost });
     executor.writeLine("Running the following PowerShell script (elevated):");
     executor.writeLine(script);
-    const { code, output } = await executor.captureOnSystem({
-      gsudo: true,
-      command: "powershell.exe",
-      args: ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodePowerShellCommand(script)],
-    });
+    const { code, output } = await runPowerShellScript(executor, script, { gsudo: true });
 
     const scriptError = findCnameScriptError(output);
     if (output.includes("VS_INIT_CNAME_CREATED")) {
@@ -1636,6 +1702,243 @@ function registerCname(folderUri) {
   });
 }
 
+/** Pure. Splits a tag into alternating digit/non-digit runs, e.g.
+ * "v1.1.1184.377622" -> ["v","1",".","1",".","1184",".","377622"].
+ * Empty array for an empty tag. */
+function tokenizeTag(tag) {
+  return tag.match(/\d+|\D+/g) || [];
+}
+
+/** Pure. Is `tag` a "flavor" variant rather than a real, pickable
+ * version -- confirmed against two real registries' actual tag lists
+ * (ghcr.io/vertigis/studio/base, docker.io/library/caddy). Every
+ * non-digit run has to be "trivial" to NOT count as flavor text: after
+ * stripping any leading punctuation, at most one letter can remain.
+ * That covers a bare separator like "." or "-" (nothing left after
+ * stripping), a leading version-prefix letter like the "v" in
+ * "v1.1.1184.377622" (nothing to strip, already just one letter), AND
+ * -- the case real data actually exposed -- a single-letter marker
+ * elsewhere in the tag, like the "-r" in GHCR's own
+ * "v1.1.598.224400-r13470513045" build-id suffix (strip the "-",
+ * one letter remains). A naive "only the very first character is
+ * exempt" version of this rule wrongly flagged that real GHCR tag
+ * shape as flavored -- caught by testing against the actual tag list,
+ * not just hand-picked examples. Genuine flavor text ("-alpine",
+ * "-builder-windowsservercore-ltsc", leading "nanoserver-ltsc") is
+ * always more than one letter after stripping, so it's still caught
+ * the same way regardless of whether it sits before, between, or after
+ * the tag's numeric runs -- no separate leading/internal/trailing
+ * cases needed. A tag with no digits at all (e.g. "latest",
+ * "nanoserver") is also considered flavored here -- it's not a
+ * comparable version either way. */
+function isFlavoredTag(tag) {
+  return tokenizeTag(tag).some((token) => {
+    if (/^\d+$/.test(token)) {
+      return false;
+    }
+    const stripped = token.replace(/^[^a-zA-Z0-9]+/, "");
+    return !/^[a-zA-Z]?$/.test(stripped);
+  });
+}
+
+/** Pure. The tag's numeric runs, parsed as BigInt (cheap correctness
+ * insurance against a pathological huge build number -- not that
+ * that's likely, Number would almost certainly be fine too, but this
+ * costs nothing). Empty array for a tag with no digits at all. */
+function tagVersionKey(tag) {
+  return tokenizeTag(tag)
+    .filter((token) => /^\d+$/.test(token))
+    .map((token) => BigInt(token));
+}
+
+/** Pure. Compares two tags by their numeric runs, component by
+ * component, as actual numbers -- not strings. This is the whole point:
+ * confirmed empirically that Docker Hub's own tag list is plain lexical
+ * string order, which gets "2.10.0" sorting before "2.2.0" (wrong --
+ * 2.10.0 is newer). A missing trailing component compares as 0, so "2"
+ * sorts as equivalent to "2.0.0" relative to "2.11.7". Standard
+ * comparator convention: negative if a < b, positive if a > b, 0 if
+ * equal (by every compared component). */
+function compareTagVersions(a, b) {
+  const keyA = tagVersionKey(a);
+  const keyB = tagVersionKey(b);
+  const length = Math.max(keyA.length, keyB.length);
+  for (let i = 0; i < length; i++) {
+    const diff = (keyA[i] ?? 0n) - (keyB[i] ?? 0n);
+    if (diff !== 0n) {
+      return diff < 0n ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+/** Pure. The real, pickable versions out of a raw tags list -- no
+ * flavor variants, no non-version tags (latest and friends), sorted
+ * ascending (oldest first; callers wanting newest-first just reverse
+ * it). "latest" is deliberately excluded here even though it'd fail
+ * the flavor check anyway (no digits) -- it's handled as a separately
+ * hard-pinned choice by the caller instead of flowing through version
+ * comparison at all. */
+function cleanVersionTags(tags) {
+  return tags
+    .filter((tag) => tag !== "latest" && !isFlavoredTag(tag) && tagVersionKey(tag).length > 0)
+    .sort(compareTagVersions);
+}
+
+/** Pure. Parses `realm="...",service="...",scope="..."` (plus the
+ * leading "Bearer " this is always found after) out of a 401 response's
+ * WWW-Authenticate header -- the standard OCI Distribution Spec
+ * anonymous-auth challenge. Confirmed against two real registries'
+ * actual headers (ghcr.io and Docker Hub both use this exact shape,
+ * just with different realm/service values). Returns {} for a header
+ * that doesn't match at all (e.g. a non-Bearer challenge). */
+function parseWwwAuthenticate(header) {
+  const result = {};
+  const pattern = /(\w+)="([^"]*)"/g;
+  let match;
+  while ((match = pattern.exec(header || "")) !== null) {
+    result[match[1]] = match[2];
+  }
+  return result;
+}
+
+/** Pure. Splits a compose.yml image reference into its registry,
+ * repository, and tag -- e.g. "ghcr.io/vertigis/studio/base:latest" ->
+ * {registry: "ghcr.io", repository: "vertigis/studio/base", tag:
+ * "latest"}, "caddy:2" -> {registry: "docker.io", repository:
+ * "library/caddy", tag: "2"} (Docker Hub's implicit "library/" namespace
+ * for an unqualified official image name). `name` is the exact
+ * substring before the tag (or the whole reference, if there's no tag)
+ * -- kept verbatim, not reconstructed from registry+repository, so
+ * writing a new tag back never changes how the image was originally
+ * written (never turns "caddy:2" into "docker.io/library/caddy:2" just
+ * because that's technically what it resolves to). A colon is only
+ * treated as the tag separator if it comes after the first "/" (so a
+ * registry's own :port, e.g. "myregistry.example.com:5000/image:1.0",
+ * isn't mistaken for one). */
+function parseImageRef(image) {
+  const slashIndex = image.indexOf("/");
+  const tagIndex = image.lastIndexOf(":");
+  const hasTag = tagIndex !== -1 && (slashIndex === -1 || tagIndex > slashIndex);
+  const name = hasTag ? image.slice(0, tagIndex) : image;
+  const tag = hasTag ? image.slice(tagIndex + 1) : null;
+
+  const firstSegment = name.split("/")[0];
+  const looksLikeRegistry = firstSegment.includes(".") || firstSegment.includes(":") || firstSegment === "localhost";
+  const registry = looksLikeRegistry ? firstSegment : "docker.io";
+  const repository = looksLikeRegistry
+    ? name.slice(firstSegment.length + 1)
+    : name.includes("/")
+      ? name
+      : `library/${name}`;
+
+  return { registry, repository, name, tag };
+}
+
+/** Pure. "docker.io" (the conventional registry identifier used in
+ * image references, and what's shown to the user) isn't actually the
+ * host that serves the registry API -- that's registry-1.docker.io.
+ * docker.io itself serves Docker Hub's web UI; hitting
+ * https://docker.io/v2/... returns an HTML page (confirmed -- the
+ * actual bug this was written to fix: "<!DOCTYPE ..." where JSON was
+ * expected), not a JSON 401 challenge. Every other registry (ghcr.io
+ * included) uses the same host for both purposes, so this is a
+ * one-off translation, not a general pattern. */
+function registryApiHost(registry) {
+  return registry === "docker.io" ? "registry-1.docker.io" : registry;
+}
+
+/** Fetches every tag for `registry`/`repository` via the plain OCI
+ * Distribution Spec anonymous-pull flow: an unauthenticated request,
+ * a 401 with a WWW-Authenticate challenge, an anonymous token from
+ * whatever realm/service/scope that challenge names (reused verbatim,
+ * not guessed at), then the real request again with that bearer token.
+ * No credentials needed for a public image -- confirmed working this
+ * way against both ghcr.io and Docker Hub. Aborts along with the
+ * executor's own signal, same as every other network call in this
+ * extension. */
+async function fetchTags(registry, repository, signal) {
+  const url = `https://${registryApiHost(registry)}/v2/${repository}/tags/list`;
+  const first = await fetch(url, { signal });
+  if (first.status === 401) {
+    const { realm, service, scope } = parseWwwAuthenticate(first.headers.get("www-authenticate"));
+    if (!realm) {
+      throw new Error(`${registry} asked for auth but didn't say how (no usable WWW-Authenticate header).`);
+    }
+    const tokenUrl = new URL(realm);
+    if (service) {
+      tokenUrl.searchParams.set("service", service);
+    }
+    if (scope) {
+      tokenUrl.searchParams.set("scope", scope);
+    }
+    const tokenResponse = await fetch(tokenUrl.toString(), { signal });
+    const { token } = await tokenResponse.json();
+    const authed = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal });
+    if (!authed.ok) {
+      throw new Error(`${registry} rejected the authenticated tags request (HTTP ${authed.status}).`);
+    }
+    const data = await authed.json();
+    return data.tags || [];
+  }
+  if (!first.ok) {
+    throw new Error(`${registry} returned HTTP ${first.status} for ${repository}.`);
+  }
+  const data = await first.json();
+  return data.tags || [];
+}
+
+/** Lets the user pick a new tag for the image on this specific
+ * compose.yml line, straight from the real registry's own tag list --
+ * no local guessing about what versions exist. "latest" is always
+ * offered first regardless of what cleanVersionTags finds (hard-pinned,
+ * since it's always a valid choice for any image whether or not the
+ * registry's tag list happens to include it in a form that'd survive
+ * the flavor filter), followed by every real version, newest first. */
+function pickVersion(documentUri, line) {
+  executeTask("Pick Version", async (executor) => {
+    const doc = await vscode.workspace.openTextDocument(documentUri);
+    const lineText = doc.lineAt(line).text;
+    const currentValue = extractLineValue(lineText);
+    if (!currentValue) {
+      executor.writeLine("Could not read an image reference on this line.");
+      return 1;
+    }
+
+    const { registry, repository, name } = parseImageRef(currentValue);
+    executor.writeLine(`Looking up tags for ${registry}/${repository}...`);
+    let tags;
+    try {
+      tags = await fetchTags(registry, repository, executor.signal);
+    } catch (err) {
+      executor.writeLine(`Could not fetch tags: ${err.message}`);
+      return 1;
+    }
+
+    const versions = cleanVersionTags(tags).reverse();
+    executor.writeLine(`${versions.length} real version(s) found (plus latest).`);
+    const choices = ["latest", ...versions];
+    const picked = await vscode.window.showQuickPick(choices, { placeHolder: `Pick a version for ${repository}` });
+    if (!picked) {
+      executor.writeLine("Cancelled.");
+      return 1;
+    }
+
+    const newValue = `${name}:${picked}`;
+    const changed = await applyTextEdit(documentUri, (text) => {
+      const lines = text.split("\n");
+      const updated = replaceLineValue(lines[line], newValue);
+      if (updated === null || updated === lines[line]) {
+        return null;
+      }
+      lines[line] = updated;
+      return lines.join("\n");
+    });
+    executor.writeLine(changed ? `Updated to ${newValue}.` : `${repository} is already pinned to ${picked}.`);
+    return 0;
+  });
+}
+
 function buildCodeLenses(document) {
   const lines = [];
   for (let i = 0; i < document.lineCount; i++) {
@@ -1652,16 +1955,25 @@ function buildCodeLenses(document) {
     requestCert: "vsInit.requestCert",
     retrieveCert: "vsInit.retrieveCert",
     registerCname: "vsInit.registerCname",
+    pickVersion: "vsInit.pickVersion",
   };
   // Build Caddyfile scans every project's compose.yml, not just the
   // clicked one, so it doesn't need (and isn't passed) a folderUri.
   // registerApp/updateApp also pass their own kind through, since
   // registerOrUpdateApp picks its arc from whichever lens was actually
-  // clicked, not from compose.yml's current state.
+  // clicked, not from compose.yml's current state. pickVersion needs
+  // the document itself (and which line) rather than the folder -- it
+  // edits one specific image: line, not something folder-scoped.
   return findLensSpecs(lines).map(({ line, title, kind }) => {
     const range = new vscode.Range(line, 0, line, 0);
     const args =
-      kind === "caddyfile" ? [] : kind === "registerApp" || kind === "updateApp" ? [folderUri, kind] : [folderUri];
+      kind === "caddyfile"
+        ? []
+        : kind === "registerApp" || kind === "updateApp"
+          ? [folderUri, kind]
+          : kind === "pickVersion"
+            ? [document.uri, line]
+            : [folderUri];
     return new vscode.CodeLens(range, { title, command: commandFor[kind], arguments: args });
   });
 }
@@ -1714,6 +2026,10 @@ function activate(context) {
     registerCname(folderUri);
   });
 
+  const pickVersionCommand = vscode.commands.registerCommand("vsInit.pickVersion", (documentUri, line) => {
+    pickVersion(documentUri, line);
+  });
+
   // Gated the same way the side panel is -- without this, the lens
   // fires on any compose.yml anywhere, not just ours.
   const codeLensProvider = vscode.languages.registerCodeLensProvider(
@@ -1723,6 +2039,58 @@ function activate(context) {
       provideCodeLenses: (document) => (looksLikeOurs() ? buildCodeLenses(document) : []),
     }
   );
+
+  // Singleton like currentView/currentTerminal elsewhere in this file --
+  // clicking Guidance again reveals the same panel instead of piling up
+  // tabs.
+  let currentGuidancePanel;
+
+  function showGuidance() {
+    const hideWelcome = vscode.workspace.getConfiguration("vsInit").get("hideWelcome", false);
+    if (currentGuidancePanel) {
+      currentGuidancePanel.webview.html = getGuidanceHtml(currentGuidancePanel.webview, context.extensionUri, hideWelcome);
+      currentGuidancePanel.reveal();
+      return;
+    }
+
+    // Beside, not One -- compose.yml files always open in column One
+    // elsewhere in this extension, so Guidance opening there too would
+    // collide with/replace whichever one is already open instead of
+    // letting both be visible side by side.
+    const panel = vscode.window.createWebviewPanel(
+      "vsInitGuidance",
+      "VertiGIS Studio Guidance",
+      vscode.ViewColumn.Beside,
+      {
+        enableScripts: true,
+        localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")],
+      }
+    );
+    panel.webview.html = getGuidanceHtml(panel.webview, context.extensionUri, hideWelcome);
+    panel.webview.onDidReceiveMessage((message) => {
+      if (message.type === "setHideWelcome") {
+        vscode.workspace
+          .getConfiguration("vsInit")
+          .update("hideWelcome", message.value, vscode.ConfigurationTarget.Workspace);
+      }
+    });
+    panel.onDidDispose(() => {
+      if (currentGuidancePanel === panel) {
+        currentGuidancePanel = undefined;
+      }
+    });
+    currentGuidancePanel = panel;
+  }
+
+  // Shown once per window, the first time this folder is recognized --
+  // not re-shown just because the CodeLens/gating re-runs (e.g. on an
+  // unrelated workspace-folder change), and never at all once the
+  // workspace's own vsInit.hideWelcome setting says not to (provision.sh
+  // writes that setting -- defaulted to false, i.e. "show it" -- into
+  // every freshly-provisioned workspace's own settings.json).
+  if (looksLikeOurs() && !vscode.workspace.getConfiguration("vsInit").get("hideWelcome", false)) {
+    showGuidance();
+  }
 
   let currentView;
 
@@ -1749,6 +2117,10 @@ function activate(context) {
         }
       });
       webviewView.webview.onDidReceiveMessage(async (message) => {
+        if (message.type === "openGuidance") {
+          showGuidance();
+          return;
+        }
         const folders = vscode.workspace.workspaceFolders;
         const studioFolderUri = folders && folders[0] && folders[0].uri;
         if (!studioFolderUri) {
@@ -1781,10 +2153,251 @@ function activate(context) {
     requestCertCommand,
     retrieveCertCommand,
     registerCnameCommand,
+    pickVersionCommand,
     codeLensProvider,
     codeLensChangeEmitter,
     mainView
   );
+}
+
+/** The "Getting Started"/walkthrough content. Written for the audience
+ * PLAN.md itself describes: Windows Enterprise admins, not Linux
+ * people -- every concept this extension assumes (Remote-SSH, compose
+ * projects, what a CodeLens action actually does and why) gets spelled
+ * out here in plain language, not just linked to elsewhere. Placed in
+ * the editor (a WebviewPanel), not the sidebar -- there's enough
+ * content here that it needs real width, and it's the kind of thing a
+ * user reads once up front then occasionally refers back to, not
+ * something that should compete for space with the side panel's own
+ * project list. */
+function getGuidanceHtml(webview, extensionUri, hideWelcome) {
+  const bannerUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "banner.svg"));
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body {
+    margin: 0;
+    padding: 1.5rem 2rem 3rem;
+    max-width: 50rem;
+    background: var(--vscode-editor-background);
+    color: var(--vscode-editor-foreground);
+    font-family: var(--vscode-font-family);
+    line-height: 1.5;
+  }
+  img.banner {
+    width: 100%;
+    max-width: 28rem;
+    height: auto;
+    margin-bottom: 0.5rem;
+  }
+  h1 { font-size: 1.4em; margin: 1.5rem 0 0.5rem; }
+  h2 {
+    font-size: 1.15em;
+    margin: 2rem 0 0.5rem;
+    padding-bottom: 0.25rem;
+    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  }
+  h3 { font-size: 1em; margin: 1.25rem 0 0.4rem; }
+  p { margin: 0.5rem 0; }
+  code {
+    background: var(--vscode-textCodeBlock-background);
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    font-family: var(--vscode-editor-font-family, monospace);
+  }
+  ol, ul { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  .cue {
+    border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    margin: 0.75rem 0;
+  }
+  .cue h3 { margin-top: 0; }
+  .cue .where {
+    display: inline-block;
+    font-size: 0.85em;
+    opacity: 0.75;
+    margin-bottom: 0.35rem;
+  }
+  .footer {
+    margin-top: 2.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9em;
+    opacity: 0.85;
+  }
+</style>
+</head>
+<body>
+  <img class="banner" src="${bannerUri}" alt="VertiGIS Studio" />
+
+  <p>This Windows machine is set up to manage a <strong>VertiGIS Studio</strong> deployment that
+  actually <em>runs</em> somewhere else: a separate Linux server, using Docker. You don't need to
+  become a Linux person to use it -- this page explains the handful of concepts that matter and
+  what each button in this extension actually does.</p>
+
+  <h2>What you're looking at</h2>
+  <p>This VS Code window is connected directly to that Linux server over SSH (that's what "Remote
+  (SSH)" in the bottom-left corner means). When you open or edit a file here, you're editing the
+  real file <em>on the server</em>, immediately -- there's no separate upload step, no syncing.
+  Closing this window doesn't undo anything you've already saved.</p>
+  <p>Everything lives under one folder on that server: <code>/opt/vertigis-studio</code>. That's
+  the folder this window has open.</p>
+
+  <h2>Projects and compose.yml</h2>
+  <p>Inside <code>/opt/vertigis-studio</code>, each subfolder is a <strong>project</strong> --
+  one self-contained thing that Docker runs. You'll typically have:</p>
+  <ul>
+    <li><strong>A caddy project</strong> (named <code>caddy</code> or <code>caddy-1</code>) -- the
+    "front door." It's what actually receives web traffic from the internet/your network and
+    forwards it to the right place, and it's what handles HTTPS.</li>
+    <li><strong>One or more studio projects</strong> (<code>studio-1</code>, <code>studio-2</code>,
+    ...) -- each one is a running copy of VertiGIS Studio itself.</li>
+  </ul>
+  <p>Every project has a <code>compose.yml</code> file -- that's the file that tells Docker what to
+  run and how to configure it. You don't need to understand Docker Compose as a format to use this
+  extension; just know that:</p>
+  <ul>
+    <li>A line like <code>environment:</code> introduces a list of settings, one per line below it,
+    each shaped like <code>SETTING_NAME: value</code>. Changing the deployment's behavior almost
+    always just means changing the text after one of these colons.</li>
+    <li>A line starting with <code>#</code> is a comment -- a note for humans, Docker ignores it.
+    Some of those comments are what make the buttons described below show up.</li>
+  </ul>
+
+  <h2>The side panel</h2>
+  <p>Open it from the VertiGIS Studio icon in the Activity Bar (the strip of icons on the far
+  left). It has:</p>
+  <ul>
+    <li><strong>Add Caddy</strong> / <strong>Add Studio</strong> -- create a new project folder
+    with a ready-to-edit <code>compose.yml</code> already in it.</li>
+    <li><strong>Compose Projects</strong> -- every existing project, as a clickable list that jumps
+    straight to its <code>compose.yml</code>.</li>
+    <li><strong>Guidance</strong> -- brings you back to this page any time.</li>
+  </ul>
+
+  <h2>The buttons that appear inside compose.yml</h2>
+  <p>Open any project's <code>compose.yml</code> and you'll see small clickable links (VS Code
+  calls these "CodeLens") floating just above certain lines. Each one runs a real action -- most of
+  them open a terminal-like panel at the bottom (named <strong>vs-init</strong>) so you can watch
+  what's happening; that panel is reused for whatever you click most recently, not one per action.</p>
+
+  <div class="cue">
+    <span class="where">Appears above: the <code>environment:</code> line, for a studio project</span>
+    <h3>Get Account ID</h3>
+    <p>Opens your web browser so you can sign in and confirm which VertiGIS Studio account this
+    deployment belongs to. Fills in <code>VERTIGIS_ACCOUNT_ID</code> for you -- you never have to
+    go look that value up yourself.</p>
+  </div>
+
+  <div class="cue">
+    <span class="where">Appears above: the <code>environment:</code> line, for a studio project</span>
+    <h3>Register App / Update App</h3>
+    <p>Your organization's ArcGIS/Portal sign-in needs to know about this specific deployment
+    before users can log into it. Clicking this opens a browser window for you to sign in to your
+    portal, then registers (or updates) an application entry there automatically and fills in
+    <code>ARCGIS_APP_ID</code>. <strong>Register App</strong> always stays available even after
+    you've already registered once -- clicking it again just creates a fresh registration, which is
+    sometimes exactly what you want (e.g. starting over cleanly); <strong>Update App</strong> only
+    appears once there's already an app id, and just refreshes its settings instead of creating a
+    new one.</p>
+  </div>
+
+  <div class="cue">
+    <span class="where">Appears above: the <code>environment:</code> line, for a studio project</span>
+    <h3>Request Cert / Retrieve Cert</h3>
+    <p>If your organization has its own internal certificate authority (common for anything not
+    meant to be public on the internet), this requests a real HTTPS certificate for this
+    deployment's web address from it, using your Windows machine's own certificate tools -- you may
+    see an administrator-approval prompt, since issuing a certificate needs that. Some certificate
+    authorities issue immediately; others take a moment to approve the request first. If
+    <strong>Request Cert</strong> reports the certificate isn't ready yet, run <strong>Retrieve
+    Cert</strong> afterward (any time) to pick it up once it is -- re-running either one is always
+    safe.</p>
+  </div>
+
+  <div class="cue">
+    <span class="where">Appears above: the <code>environment:</code> line, for a studio project</span>
+    <h3>Register CNAME</h3>
+    <p>Tries to automatically point your organization's internal DNS at this server, so people can
+    actually reach this deployment by name. This is best-effort by design: it only works if your
+    network's DNS is set up in a fairly standard way, and it will clearly tell you if it couldn't
+    figure out where to make the change rather than guessing. If it doesn't work, that's expected
+    for some networks -- ask whoever manages DNS at your organization to point the name at this
+    server manually instead.</p>
+  </div>
+
+  <div class="cue">
+    <span class="where">Appears above: the top of the file, for a studio project (it's file-wide,
+    like Build Caddyfile, not tied to one specific line)</span>
+    <h3>Transfer Enterprise Trust Anchors</h3>
+    <p>If your organization uses its own internal certificate authority (see Request Cert above),
+    the Linux server also needs to be told to trust it -- otherwise it won't trust its own
+    certificate, or anything else signed by your organization. This copies your Windows machine's
+    own list of trusted certificates to the server. Safe to re-run any time (e.g. after your IT
+    department rolls out a new certificate authority).</p>
+  </div>
+
+  <div class="cue">
+    <span class="where">Appears above: the top of the file, for any project with "# caddy" cues
+    (including the caddy project's own compose.yml)</span>
+    <h3>Build Caddyfile</h3>
+    <p>Looks across <em>every</em> project for two specific comments -- <code># caddy route
+    url</code> and <code># caddy route target</code> -- and wires them all together into the caddy
+    project's own configuration, so the front door actually knows how to reach each studio
+    deployment. Run this again any time you add a new studio project or change a web address. It
+    also automatically picks up a real certificate for a deployment (see Request Cert above) if one
+    exists -- nothing to configure separately for that.</p>
+  </div>
+
+  <div class="cue">
+    <span class="where">Appears above: any <code>image:</code> line</span>
+    <h3>Pick Version</h3>
+    <p>Shows every real released version of that image (VertiGIS Studio, or Caddy) actually
+    available right now, newest first, and lets you pin this project to a specific one instead of
+    always using <code>latest</code>. Useful when you want this deployment to stop moving until you
+    deliberately decide to upgrade it.</p>
+  </div>
+
+  <h2>Setting up a new deployment, roughly in order</h2>
+  <ol>
+    <li>If there's no caddy project yet, click <strong>Add Caddy</strong>.</li>
+    <li>Click <strong>Add Studio</strong> to create a new studio project.</li>
+    <li>Open its <code>compose.yml</code> and fill in <code>ARCGIS_PORTAL_URL</code> and the
+    <code># caddy route url</code>/<code>FRONTEND_URL</code> value (the web address people will
+    actually use to reach it).</li>
+    <li>Click <strong>Get Account ID</strong>, then <strong>Register App</strong>.</li>
+    <li>If your organization uses an internal certificate authority: click <strong>Transfer
+    Enterprise Trust Anchors</strong> once per server, then <strong>Request Cert</strong> for this
+    deployment (and <strong>Retrieve Cert</strong> later if needed).</li>
+    <li>Click <strong>Build Caddyfile</strong> to wire the front door up to this deployment.</li>
+    <li>Optionally, click <strong>Register CNAME</strong> to try to point DNS here automatically.</li>
+    <li>Start the containers: the Docker/Container Tools extensions already installed in this
+    window can do this from their own panel, or run <code>docker compose up -d</code> in a terminal
+    opened in the project's own folder.</li>
+  </ol>
+
+  <div class="footer">
+    <label>
+      <input type="checkbox" id="hide-welcome" ${hideWelcome ? "checked" : ""} />
+      Don't open this automatically when a VertiGIS Studio folder is opened
+    </label>
+  </div>
+
+  <script>
+    const vscode = acquireVsCodeApi();
+    document.getElementById("hide-welcome").addEventListener("change", (event) => {
+      vscode.postMessage({ type: "setHideWelcome", value: event.target.checked });
+    });
+  </script>
+</body>
+</html>`;
 }
 
 function getMainViewHtml(webview, extensionUri, projects) {
@@ -1851,11 +2464,12 @@ function getMainViewHtml(webview, extensionUri, projects) {
   <img class="banner" src="${bannerUri}" alt="VertiGIS Studio" />
   <p class="explainer">Manage this Docker deployment's projects without leaving VS Code.</p>
 
-  <h3>Create Projects</h3>
+  <h3>Actions</h3>
   <button id="add-caddy">Add Caddy</button>
   <button id="add-studio">Add Studio</button>
+  <button id="guidance">Guidance</button>
 
-  <h3>Projects</h3>
+  <h3>Compose Projects</h3>
   <ul id="projects">${projectItems}</ul>
 
   <script>
@@ -1865,6 +2479,9 @@ function getMainViewHtml(webview, extensionUri, projects) {
     });
     document.getElementById("add-studio").addEventListener("click", () => {
       vscode.postMessage({ type: "addProject", kind: "studio" });
+    });
+    document.getElementById("guidance").addEventListener("click", () => {
+      vscode.postMessage({ type: "openGuidance" });
     });
     document.getElementById("projects").addEventListener("click", (event) => {
       const link = event.target.closest(".project-link");
@@ -1911,4 +2528,13 @@ module.exports = {
   applyPortHint,
   findCnameScriptError,
   looksLikeCaddyProjectFile,
+  tokenizeTag,
+  isFlavoredTag,
+  tagVersionKey,
+  compareTagVersions,
+  cleanVersionTags,
+  parseWwwAuthenticate,
+  parseImageRef,
+  registryApiHost,
+  lineCommentText,
 };
