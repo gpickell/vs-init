@@ -112,13 +112,13 @@ def create_profile(name: str, host: str, user: str) -> None:
 def _create_new_profile() -> Optional[str]:
     """Ask for a profile name, host, and user; add the Host entry.
     Returns the new profile's name, or None if cancelled."""
-    name = questionary.text("Profile:").ask()
+    name = questionary.text("Profile:").unsafe_ask()
     if not name:
         return None
-    host = questionary.text("Host:").ask()
+    host = questionary.text("Host:").unsafe_ask()
     if not host:
         return None
-    user = questionary.text("User:").ask()
+    user = questionary.text("User:").unsafe_ask()
     if not user:
         return None
 
@@ -141,7 +141,7 @@ def choose_profile() -> Optional[str]:
         default = last if last in profiles else profiles[0]
         choice = questionary.select(
             "SSH profile:", choices=[*profiles, NEW_PROFILE], default=default
-        ).ask()
+        ).unsafe_ask()
         if choice is None:
             return None
         name = choice if choice != NEW_PROFILE else _create_new_profile()

@@ -17,9 +17,18 @@ doing so unconditionally, the same way it asks before transferring SSH
 keys for auto-logon."""
 from __future__ import annotations
 
+import shutil
+
 from . import winsudo
 
 _CAPABILITY_NAME = "Rsat.Dns.Tools~~~~0.0.1.0"
+
+
+def is_installed() -> bool:
+    """Unelevated sniff: dnscmd.exe ships as part of this capability, so
+    its presence on PATH is a free stand-in for Get-WindowsCapability
+    (which needs elevation just to query, unlike a plain PATH lookup)."""
+    return shutil.which("dnscmd") is not None
 
 
 def install() -> None:

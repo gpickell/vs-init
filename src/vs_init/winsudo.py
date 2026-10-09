@@ -131,3 +131,16 @@ def capture(args: Sequence[str]) -> Tuple[int, str]:
         [gsudo, *args], capture_output=True, text=True
     )
     return result.returncode, result.stdout + result.stderr
+
+
+def set_cache_mode(mode: str) -> None:
+    """Set gsudo's own persistent CacheMode config ("Auto" or
+    "Explicit"). This is gsudo itself being invoked (its `config`
+    subcommand) rather than a command run()/capture() wraps -- CacheMode
+    is a global-only setting, so gsudo handles the elevation this needs
+    internally (its own UAC prompt), the same way it did live when this
+    was tested by hand."""
+    gsudo = ensure_gsudo()
+    result = subprocess.run([gsudo, "config", "CacheMode", mode], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise ElevationError(f"Setting gsudo's CacheMode failed: {result.stderr.strip()}")

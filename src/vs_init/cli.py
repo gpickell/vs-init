@@ -41,6 +41,28 @@ _PROCEED_SKIP = "Proceed, and skip this prompt next time"
 _EXIT = "Exit"
 
 _SKIP_INTRO_KEY = "skip_intro"
+_SKIP_DNS_TOOLS_KEY = "skip_dns_tools_prompt"
+_GSUDO_CACHE_MODE_ASKED_KEY = "gsudo_cache_mode_asked"
+
+_GSUDO_BLURB = """\
+gsudo is this tool's equivalent of Linux's sudo -- it's what lets vs-init (and the VertiGIS
+Studio extension it installs) run specific commands as an administrator, without making you
+run your whole terminal or VS Code as admin all the time. Expect a Windows "Do you want to
+allow this app to make changes to your device?" prompt whenever an elevated action runs; how
+often you see it from then on depends on the consent mode you pick below (changeable later by
+running `gsudo config CacheMode <Auto|Explicit>` yourself):
+
+Consent Mode: Convenience (fewer UAC prompts)
+  Safe to use for experts, and most like sudo in Linux. You are still responsible for applying
+  your organization's security posture, so only select this if you are certain it's
+  appropriate here.
+
+Consent Mode: Explicit (safest)
+  Best for operators that seldom need administrator elevation.\
+"""
+
+_CONVENIENCE = "Convenience (fewer UAC prompts)"
+_EXPLICIT = "Explicit (safest)"
 
 
 def _show_banner() -> bool:
@@ -52,7 +74,7 @@ def _show_banner() -> bool:
         "Proceed?",
         choices=[_PROCEED, _PROCEED_SKIP, _EXIT],
         default=_EXIT,
-    ).ask()
+    ).unsafe_ask()
 
     if choice == _PROCEED_SKIP:
         settings.set_setting(_SKIP_INTRO_KEY, True)
@@ -60,13 +82,37 @@ def _show_banner() -> bool:
     return choice == _PROCEED
 
 
-def _ensure_gsudo() -> None:
+def _ensure_gsudo() -> bool:
     try:
         winsudo.ensure_gsudo()
     except winsudo.ElevationError as exc:
         print(f"gsudo install failed: {exc}")
-        return
+        return False
     print("gsudo OK.")
+    return True
+
+
+def _configure_gsudo_cache() -> None:
+    if settings.get_setting(_GSUDO_CACHE_MODE_ASKED_KEY, False):
+        return
+
+    print(_GSUDO_BLURB)
+    choice = questionary.select(
+        "gsudo consent mode:",
+        choices=[_EXPLICIT, _CONVENIENCE],
+        default=_EXPLICIT,
+    ).unsafe_ask()
+    settings.set_setting(_GSUDO_CACHE_MODE_ASKED_KEY, True)
+    if choice is None:
+        return
+
+    mode = "Auto" if choice == _CONVENIENCE else "Explicit"
+    try:
+        winsudo.set_cache_mode(mode)
+    except winsudo.ElevationError as exc:
+        print(f"Setting gsudo's consent mode failed: {exc}")
+        return
+    print(f"gsudo consent mode set to {mode}.")
 
 
 def _ensure_ssh() -> None:
@@ -79,11 +125,17 @@ def _ensure_ssh() -> None:
 
 
 def _ensure_dns_tools() -> None:
+    if dnstools.is_installed():
+        print("RSAT: DNS Server Tools OK.")
+        return
+    if settings.get_setting(_SKIP_DNS_TOOLS_KEY, False):
+        return
     if not questionary.confirm(
         'Install RSAT: DNS Server Tools? Enables the optional "Register CNAME" action in the '
         "editor extension later. Can take a few minutes; safe to skip.",
         default=False,
-    ).ask():
+    ).unsafe_ask():
+        settings.set_setting(_SKIP_DNS_TOOLS_KEY, True)
         return
     try:
         dnstools.install()
@@ -151,7 +203,7 @@ def _ensure_auto_logon(profile: Optional[str]) -> None:
         if sshprofile.passwordless_login_works(profile):
             print("Auto-logon OK.")
             return
-        if not questionary.confirm("Transfer keys for auto login?", default=True).ask():
+        if not questionary.confirm("Transfer keys for auto login?", default=True).unsafe_ask():
             return
         sshprofile.propagate_key(profile)
         ok = sshprofile.passwordless_login_works(profile)
@@ -213,21 +265,31 @@ def main() -> None:
         print("vs-init currently targets Windows hosts only.")
         return
 
-    if not _show_banner():
-        print("Cancelled.")
-        return
+    # Every prompt below uses unsafe_ask() specifically so Ctrl-C
+    # propagates here as a real KeyboardInterrupt instead of questionary's
+    # default of swallowing it and returning None -- which previously made
+    # Ctrl-C indistinguishable from "answered no/skip" at each individual
+    # prompt, silently fast-forwarding into the next step rather than
+    # actually cancelling the run.
+    try:
+        if not _show_banner():
+            print("Cancelled.")
+            return
 
-    _ensure_gsudo()
-    _ensure_ssh()
-    _ensure_dns_tools()
-    _ensure_vscode()
-    _ensure_key()
-    profile = _choose_ssh_profile()
-    _ensure_remote_platform(profile)
-    _ensure_auto_logon(profile)
-    if _provision(profile):
-        _ensure_remote_extensions(profile)
-        _launch_vscode_remote(profile)
+        if _ensure_gsudo():
+            _configure_gsudo_cache()
+        _ensure_ssh()
+        _ensure_dns_tools()
+        _ensure_vscode()
+        _ensure_key()
+        profile = _choose_ssh_profile()
+        _ensure_remote_platform(profile)
+        _ensure_auto_logon(profile)
+        if _provision(profile):
+            _ensure_remote_extensions(profile)
+            _launch_vscode_remote(profile)
+    except KeyboardInterrupt:
+        print("\nCancelled.")
 
 
 if __name__ == "__main__":

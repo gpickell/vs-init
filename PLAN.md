@@ -35,12 +35,21 @@ Flow:
     - Proceed, and skip this prompt next time
       - Flag saved in ~/.vs-init
     - Exit (default)
-- Get gsudo (sniff first then install using winget)
+- Get gsudo (sniff first then install using winget) -- the very first thing after the banner
+- If gsudo is available, show a blurb (same style as the banner) explaining what it is/for and
+  what to expect (a Windows UAC-style prompt), then ask the user to pick its consent mode:
+  - Convenience (fewer UAC prompts) -- sets gsudo's own CacheMode to Auto
+  - Explicit (safest, default) -- sets gsudo's own CacheMode to Explicit (gsudo's shipped default)
+  Only asked once -- remembered in ~/.vs-init (gsudo_cache_mode_asked) regardless of which mode was
+  picked, so later runs don't ask again. winsudo.set_cache_mode() runs `gsudo config CacheMode
+  <mode>` directly (gsudo itself, not wrapped by run()/capture()) -- CacheMode is a global-only
+  setting, so gsudo handles the elevation this needs internally (its own UAC prompt).
 - Get ssh (sniff first then install using gsudo/powershell)
-- Ask (y/n, default no): install RSAT: DNS Server Tools? (dnstools.py) -- optional, enables the
-  Register CNAME action in the editor extension later. No sniffing first (Get-WindowsCapability
-  needs elevation too; Add-WindowsCapability doesn't error against an already-installed capability
-  anyway, so there's nothing to gain by checking first) -- just installs (elevated) if confirmed.
+- Get RSAT: DNS Server Tools (dnstools.py) -- optional, enables the Register CNAME action in the
+  editor extension later. Sniffs first via `shutil.which("dnscmd")` (Get-WindowsCapability itself
+  needs elevation just to query, so dnscmd.exe's presence on PATH is the free unelevated stand-in);
+  if already present, skips asking entirely. Otherwise asks (y/n, default no) before installing
+  (elevated) -- a decline is remembered (~/.vs-init) so it isn't asked again on a later run.
 - Get vscode (sniff first then install using winget)
 - Get vscode extensions
   - Remote Development
@@ -75,6 +84,10 @@ Flow:
       - chown to docker
       - Write .vscode/settings.json
         - Use Abyss theme
+      - Create certs/root and certs/live (group docker, group-writable) -- both are Docker bind-mount
+        sources (caddy and studio compose.yml both mount certs/root as /etc/ssl/certs; caddy also
+        mounts certs/live), so they must exist with the right group/permissions before `docker
+        compose up` ever runs, or Docker auto-creates them as plain root-owned dirs instead
 - Launch code but target remote system at the correct folder.
 - Right after launching, create a per-profile launcher (shortcut.py, DONE) so this deployment can
   be reopened later without rerunning vs-init -- see "Note: Per-profile launcher shortcut" below.
@@ -104,8 +117,12 @@ UI:
   audience the Motivation section itself names -- Windows Enterprise admins, not Linux people --
   spelling out in plain language what Remote-SSH/projects/compose.yml actually are, then walking
   through every CodeLens action (what it's for, what to expect when you click it, e.g. "may prompt
-  for administrator approval," "may need Retrieve Cert run afterward"), then a roughly-ordered
-  checklist for setting up a brand new deployment. Auto-opens once per window the first time the
+  for administrator approval," "may need Retrieve Cert run afterward"), a section on the certs
+  folder's structure (certs/root/<hash>-<subject>.pem + ca-certificates.crt; certs/live/<host>/
+  {fullchain,privkey}.pem; certs/requests/<host>/, internal-only) for anyone who needs to drop in
+  certificate material they already have instead of using Request Cert/Transfer Enterprise Trust
+  Anchors, then a roughly-ordered checklist for setting up a brand new deployment. Auto-opens once
+  per window the first time the
   folder is recognized (vsInit.looksLikeOurs), unless the workspace's own vsInit.hideWelcome
   setting says not to -- a checkbox at the bottom of the screen itself sets that (at Workspace
   scope, via vscode.workspace.getConfiguration("vsInit").update(..., ConfigurationTarget.Workspace)
@@ -115,6 +132,17 @@ UI:
   "vsInit.hideWelcome": false by default, so the setting already exists (defaulted to "show it")
   from the moment a workspace is first provisioned, declared as a real contributed setting in
   package.json rather than just an ad hoc read/write.
+- Side panel auto-reveal (DONE): the activity bar icon itself has no supported way to draw
+  attention to itself before it's been opened at least once -- WebviewView.badge exists, but can
+  only be set after the user has already opened the view, so it can't help a first-time user notice
+  a brand new icon. Settled on forcing the view open directly instead:
+  `vscode.commands.executeCommand("workbench.view.extension.vsInit")`, whenever the workspace looks
+  like ours (vsInit.looksLikeOurs) AND no editors are open in any tab group
+  (vscode.window.tabGroups.all) -- "no editors" is the best available proxy for "this window just
+  started fresh in this workspace" (VS Code normally restores a workspace's previous tabs on
+  reopen, so their absence suggests nothing carried over from a prior session). Deliberately NOT
+  gated on vsInit.hideWelcome -- unlike Guidance, there's no other affordance that ever points the
+  user at the side panel, so it doesn't share Guidance's opt-out.
 - compose.yml Code Lens
   - Cue: any "# caddy" comment, anywhere in the file -- OR the file structurally looks like a
     caddy project's own compose.yml (a caddy image, plus an inline "content: |" config block --
@@ -185,8 +213,20 @@ Flow:
   - make sure host part is lowercase
   - keep quotes if present
   - touches the last field of the line
-- Kept as inline config in caddy(-1) compose file:
-  - If none present, we add a project.
+- Written to caddy(-1)'s own Caddyfile, a real file sibling to that project's compose.yml (not
+  inline config in compose.yml itself -- an earlier version used a Docker `configs:` block with an
+  inline `content: |` block for this; replaced with a plain file bind-mounted into the container via
+  `.:/etc/caddy:ro`, with `command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--watch"]`
+  pointing at it. Wholly regenerated each run (applyTextEdit(caddyfileUri, () => caddyfileText)),
+  same as the old inline block was -- no hand-editing of this file survives a rebuild).
+  - looksLikeCaddyProjectFile()'s structural signal (for showing the lens on a caddy project's own
+    compose.yml, which has no "# caddy route ..." comments of its own) changed to match: a caddy
+    image plus that same `.:/etc/caddy:ro` self-mount line, instead of the old inline "content: |"
+    block header.
+  - addProject() copies a placeholder Caddyfile alongside compose.yml when creating a new caddy
+    project -- without it, compose.yml's `--config /etc/caddy/Caddyfile` would have nothing to
+    point at until Build Caddyfile happened to run once.
+  - If no caddy project is present, we add one.
   - Mind the trailing slashes in rewrites
   - Multiple routes may occur on one host, so some intelligence is required.
 - For each distinct host, checks whether certs/live/<host>/fullchain.pem exists on the remote
@@ -292,8 +332,27 @@ Flow:
 - If it does: upload a small triage script (templates/certTriage.sh) and run it remotely. It
   prefers the real chain.p7b (openssl pkcs7 -print_certs), falls back to treating cert.pem itself
   as a possible PKCS7 bundle, falls back further to a raw copy if that also fails -- then splits
-  the resulting bundle into certs/live/<host>/cert.pem (leaf), chain.pem (the rest), fullchain.pem
-  (everything), paired with the already-remote privkey.pem.
+  the resulting bundle into certs/live/<host>/cert.pem (leaf), chain.pem (intermediates only),
+  fullchain.pem (leaf + intermediates), paired with the already-remote privkey.pem.
+  - Real bug, caught by inspecting an actual live chain via SSH rather than trusting the script's
+    own logic on paper: a Windows CA's chain.p7b response includes the root CA certificate itself,
+    not just the leaf and intermediate(s) (confirmed against a real 3-cert chain). The original
+    script treated "everything after the leaf" as chain.pem and "the whole bundle" as fullchain.pem
+    -- so chain.pem was actually intermediates+root (missing the leaf entirely -- useless for a TLS
+    server to present on its own) and fullchain.pem was leaf+intermediates+root (the root has no
+    business being there; any real client already has it in its own trust store, and RFC 8446 says
+    not to send it). Fixed by identifying the root via self-signedness (issuer == subject) and
+    excluding it from both files. Caught a second bug fixing the first: `openssl x509 -noout
+    -issuer`/`-subject` print "issuer=..."/"subject=..." -- comparing those raw strings never
+    matches even for a genuinely self-signed cert because of the differing labels; the label has to
+    be stripped first. Both the original bug and this one were confirmed live via SSH against a
+    real chain before and after the fix, not just reasoned about from the script's source.
+  - Caddy's own `tls fullchain.pem privkey.pem` reference (liveCertPaths(), buildCaddyfileText())
+    didn't need to change -- fullchain.pem was always the right file to point Caddy at
+    conceptually, it was just built wrong.
+  - This fix only affects certs triaged after it landed; any host's live/ directory populated by a
+    Request Cert/Retrieve Cert run before this fix still has the old (root-included) fullchain.pem
+    and (leaf-missing) chain.pem on disk until that host's cert is re-triaged.
 
 ### Action: Retrieve Cert (DONE)
 
@@ -567,17 +626,18 @@ filesystem-safe on their own.
 
 ### Note: gsudo
 
-Python (bootstrap tool, winsudo.py) (DONE): does not manage gsudo's cache at all -- no
-"cache on"/"cache off", no PID-scoped cache session. It only ever makes one elevated call per
-run (installing the OpenSSH capability), so there's nothing to amortize a cache across; each
-call just takes whatever single UAC prompt gsudo's own default (Explicit) cache mode asks for.
+Neither the Python bootstrap tool (winsudo.py) nor the VS Code extension (taskExecutor.js) manage
+gsudo's credentials cache themselves -- no app-level "cache on"/PID-scoped session, no bypassing
+gsudo's own prompting. The one exception is a deliberate, one-time, user-facing choice: right after
+gsudo is confirmed available, cli.py asks the user to pick gsudo's own CacheMode (Convenience/Auto
+vs. Explicit/safest, defaulting to Explicit) and sets it via `gsudo config CacheMode <mode>` --
+see the bootstrap Flow section above for the exact wording and settings key. Outside of that one
+asked-once choice, every elevated call prompts according to whatever CacheMode is actually in
+effect, with nothing in this codebase trying to avoid or shortcut that.
 
-VS Code extension (DONE, extension/gsudo.js): a separate, first-class implementation, not a reuse
-of winsudo.py -- the extension is a long-running session where more than one elevated action is
-plausible (e.g. multiple Request Cert runs), so it's worth managing its own cache: scoped to the
-extension host's own process.pid (no ancestor-walking needed -- unlike winsudo.py's short-lived
-CLI invocation, this process IS the long-lived thing to scope to), cache enabled for 1 hour.
-TaskExecutor.executeOnSystem and the new captureOnSystem (which also buffers and returns combined
-stdout+stderr for commands like certutil/certreq whose output needs parsing) both take a
-`gsudo: true` option so an action just declares it needs elevation, without reimplementing the
-cache dance itself.
+winsudo.py only ever makes one elevated call per run (installing the OpenSSH capability) via
+`run()`/`capture()`, each a plain `gsudo <args...>` invocation.
+
+In the extension, TaskExecutor.executeOnSystem and captureOnSystem take a `gsudo: true` option so
+an action just declares it needs elevation; `spawnForExecutor` (taskExecutor.js) spawns
+`gsudo <command> <args...>` directly, with no cache-management step in front of it.

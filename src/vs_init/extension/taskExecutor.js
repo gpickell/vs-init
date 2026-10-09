@@ -1,7 +1,6 @@
 const vscode = require("vscode");
 const { spawn } = require("child_process");
 const http = require("http");
-const gsudoCache = require("./gsudo");
 
 /** Pure. A pty's "\n" only moves the cursor down a row, not back to
  * column 0 -- real terminals (and VS Code's Pseudoterminal) need "\r\n"
@@ -42,7 +41,7 @@ function spawnForExecutor({ command, args = [], cwd, env, gsudo = false, write, 
       child.on("close", (code) => resolve(collect ? { code: code === null ? -1 : code, output } : code === null ? -1 : code));
     });
 
-  return gsudo ? gsudoCache.ensureCache().then(launch) : launch();
+  return launch();
 }
 
 /** Passed into every task action. Extends AbortController so
@@ -72,9 +71,10 @@ class TaskExecutor extends AbortController {
    *
    * `gsudo: true` runs it elevated instead, via gsudo -- a first-class
    * option here rather than something each action wires up by hand.
-   * Makes sure gsudo's credentials cache is enabled first (see
-   * gsudo.js), so only the first elevated call in a given VS Code
-   * session actually prompts for admin confirmation. */
+   * gsudo is left entirely at its own default (Explicit cache mode, no
+   * app-managed caching -- see PLAN.md's "Note: gsudo"), so every
+   * elevated call prompts independently unless the user has configured
+   * gsudo's own caching for themselves outside of vs-init. */
   executeOnSystem({ command, args = [], cwd, env, gsudo = false }) {
     return spawnForExecutor({ command, args, cwd, env, gsudo, write: this._write, signal: this.signal });
   }

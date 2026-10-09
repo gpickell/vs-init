@@ -169,56 +169,25 @@ function buildCaddyfileText(routes, hasLiveCert = () => false) {
   return blocks.join("\n\n") + "\n";
 }
 
-// The YAML literal block scalar header replaceInlineConfigContent()
-// rewrites -- shared with looksLikeCaddyProjectFile() below, which uses
-// the same marker to recognize a caddy project's own compose.yml.
-const INLINE_CONFIG_CONTENT_HEADER = /^(\s*)content:\s*\|\s*$/;
-
-/** Pure. Replaces the indented text under a YAML literal block
- * scalar's header line (e.g. "    content: |") with `newContent`,
- * re-indented to match. Targeted content replacement, not a full
- * regeneration of the file -- any other hand-editing of the caddy
- * project's compose.yml survives a rebuild. Returns null if no such
- * block header is found. */
-function replaceInlineConfigContent(text, newContent) {
-  const lines = text.split("\n");
-  const headerIndex = lines.findIndex((line) => INLINE_CONFIG_CONTENT_HEADER.test(line));
-  if (headerIndex === -1) {
-    return null;
-  }
-
-  const baseIndent = lines[headerIndex].match(/^(\s*)/)[1];
-  const contentIndent = `${baseIndent}  `;
-
-  let end = headerIndex + 1;
-  while (end < lines.length && (lines[end].startsWith(contentIndent) || lines[end].trim() === "")) {
-    end++;
-  }
-  while (end > headerIndex + 1 && lines[end - 1].trim() === "") {
-    end--;
-  }
-
-  const newLines = newContent
-    .replace(/\n$/, "")
-    .split("\n")
-    .map((line) => (line ? contentIndent + line : line));
-
-  return [...lines.slice(0, headerIndex + 1), ...newLines, ...lines.slice(end)].join("\n");
-}
+// The bind mount a caddy project's own compose.yml uses to expose its
+// sibling Caddyfile to the container -- shared with
+// looksLikeCaddyProjectFile() below, which uses the same marker to
+// recognize a caddy project's own compose.yml.
+const OWN_CADDYFILE_MOUNT = /^\s*-\s*\.:\/etc\/caddy:ro\s*$/;
 
 /** Pure. Does this compose.yml look like a caddy project's own file --
- * the thing Build Caddyfile writes its generated Caddyfile INTO, not
+ * the one Build Caddyfile writes its generated Caddyfile NEXT TO, not
  * one of the project files it reads caddy route cues FROM? Two
  * structural signals, both required: a caddy image on some service,
- * and an inline "content: |" config block (the exact marker
- * replaceInlineConfigContent() rewrites). Needed because a caddy
- * project's own compose.yml has no "# caddy route ..." comments of its
- * own -- without this, opening it directly would never trigger the
- * lens at all. */
+ * and the self-mount (`.:/etc/caddy:ro`) that exposes this project's
+ * own folder -- Caddyfile included -- to the container. Needed because
+ * a caddy project's own compose.yml has no "# caddy route ..." comments
+ * of its own -- without this, opening it directly would never trigger
+ * the lens at all. */
 function looksLikeCaddyProjectFile(lines) {
   const hasCaddyImage = lines.some((line) => /^\s*image:\s*["']?caddy:/i.test(line));
-  const hasInlineContentBlock = lines.some((line) => INLINE_CONFIG_CONTENT_HEADER.test(line));
-  return hasCaddyImage && hasInlineContentBlock;
+  const hasOwnCaddyfileMount = lines.some((line) => OWN_CADDYFILE_MOUNT.test(line));
+  return hasCaddyImage && hasOwnCaddyfileMount;
 }
 
 /** Returns the first existing caddy-* project's folder name, or
@@ -237,9 +206,10 @@ async function findOrCreateCaddyProject(studioFolderUri) {
 /** Scans every project's compose.yml (depth 1) for the two caddy-route
  * cues, updates each in place (quote-preserving, per
  * replaceLineValue()), collects the resulting {url, target} pairs, and
- * writes the generated Caddyfile into the caddy project's inline
- * compose config. Triggered from either cue's CodeLens -- both do the
- * same whole-workspace scan, not just the clicked line/file. */
+ * writes the generated Caddyfile to the caddy project's own Caddyfile
+ * (bind-mounted into the container via that project's `.:/etc/caddy:ro`
+ * compose.yml entry). Triggered from either cue's CodeLens -- both do
+ * the same whole-workspace scan, not just the clicked line/file. */
 function buildCaddyfile() {
   const folders = vscode.workspace.workspaceFolders;
   const studioFolderUri = folders && folders[0] && folders[0].uri;
@@ -349,24 +319,22 @@ function buildCaddyfile() {
     }
 
     const caddyName = await findOrCreateCaddyProject(studioFolderUri);
-    const caddyComposeUri = vscode.Uri.joinPath(studioFolderUri, caddyName, "compose.yml");
-    executor.writeLine(`Writing Caddyfile config into ${caddyName}/compose.yml...`);
+    const caddyfileUri = vscode.Uri.joinPath(studioFolderUri, caddyName, "Caddyfile");
+    executor.writeLine(`Writing ${caddyName}/Caddyfile...`);
 
     const caddyfileText = buildCaddyfileText(routes, (host) => liveCertHosts.has(host));
-    let noConfigBlock = false;
-    await applyTextEdit(caddyComposeUri, (text) => {
-      const updated = replaceInlineConfigContent(text, caddyfileText);
-      noConfigBlock = updated === null;
-      return updated;
-    });
-    if (noConfigBlock) {
-      executor.writeLine(`${caddyName}/compose.yml has no inline "content: |" config block to update.`);
-      return 1;
-    }
+    // Wholly regenerated every run -- unlike compose.yml's surgical
+    // cue-line edits, there's no hand-editing of this file to preserve.
+    // Still routed through applyTextEdit (not a raw workspace.fs write)
+    // so an already-open editor updates in place instead of racing
+    // VS Code's own file-watcher-driven revert on the immediate reopen
+    // below -- addProject() guarantees every caddy project has this
+    // file from creation, so it's always there to open.
+    await applyTextEdit(caddyfileUri, () => caddyfileText);
 
-    const doc = await vscode.workspace.openTextDocument(caddyComposeUri);
+    const doc = await vscode.workspace.openTextDocument(caddyfileUri);
     await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
-    await vscode.commands.executeCommand("revealInExplorer", caddyComposeUri);
+    await vscode.commands.executeCommand("revealInExplorer", caddyfileUri);
 
     return 0;
   });
@@ -552,8 +520,8 @@ function environmentBlockValues(lines, envIndex) {
  * Build Caddyfile also shows up on a caddy project's OWN compose.yml --
  * which has no "# caddy route ..." comments of its own to match -- via
  * a second, structural cue (looksLikeCaddyProjectFile): a caddy image
- * plus an inline "content: |" config block, the shape the caddy
- * template itself has.
+ * plus the `.:/etc/caddy:ro` self-mount, the shape the caddy template
+ * itself has.
  *
  * Everything else -- Get Account ID, Register App, Update App, Request
  * Cert, Retrieve Cert, Register CNAME -- is decided together off a
@@ -724,6 +692,10 @@ function composeStubFor(kind) {
   return fs.readFileSync(path.join(__dirname, "templates", kind, "compose.yml"), "utf8");
 }
 
+function caddyfileStub() {
+  return fs.readFileSync(path.join(__dirname, "templates", "caddy", "Caddyfile"), "utf8");
+}
+
 async function listDirectories(studioFolderUri) {
   let entries;
   try {
@@ -776,6 +748,14 @@ async function addProject(studioFolderUri, kind) {
   const name = await nextProjectName(studioFolderUri, kind);
   const composeUri = vscode.Uri.joinPath(studioFolderUri, name, "compose.yml");
   await vscode.workspace.fs.writeFile(composeUri, Buffer.from(composeStubFor(kind), "utf8"));
+  if (kind === "caddy") {
+    // compose.yml's `command` points caddy at /etc/caddy/Caddyfile (bind
+    // -mounted from this same folder) from the moment the container
+    // first starts -- without this, a freshly added caddy project would
+    // fail to start at all until Build Caddyfile happened to run once.
+    const caddyfileUri = vscode.Uri.joinPath(studioFolderUri, name, "Caddyfile");
+    await vscode.workspace.fs.writeFile(caddyfileUri, Buffer.from(caddyfileStub(), "utf8"));
+  }
   return { name, composeUri };
 }
 
@@ -2053,14 +2033,14 @@ function activate(context) {
       return;
     }
 
-    // Beside, not One -- compose.yml files always open in column One
-    // elsewhere in this extension, so Guidance opening there too would
-    // collide with/replace whichever one is already open instead of
-    // letting both be visible side by side.
+    // One, not Beside -- takes the full editor area as its own tab
+    // rather than forcing a 50/50 split with whatever compose.yml is
+    // already open there (also column One). Opens as a separate tab in
+    // that same column, not a replacement of what's already open.
     const panel = vscode.window.createWebviewPanel(
       "vsInitGuidance",
       "VertiGIS Studio Guidance",
-      vscode.ViewColumn.Beside,
+      vscode.ViewColumn.One,
       {
         enableScripts: true,
         localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")],
@@ -2090,6 +2070,20 @@ function activate(context) {
   // every freshly-provisioned workspace's own settings.json).
   if (looksLikeOurs() && !vscode.workspace.getConfiguration("vsInit").get("hideWelcome", false)) {
     showGuidance();
+  }
+
+  // Separate from Guidance and not gated on hideWelcome -- the side
+  // panel's activity bar icon has no other way to catch a first-time
+  // user's eye (see PLAN.md's note on this), so it forces itself open
+  // whenever this window looks like it just started fresh in this
+  // workspace: no editors open yet is the best available proxy for that
+  // (VS Code normally restores a workspace's previous tabs on reopen, so
+  // their absence suggests nothing carried over from a prior session).
+  // Same one-time-at-activation timing as the Guidance check above, not
+  // re-run from refreshGating().
+  const hasAnyEditors = vscode.window.tabGroups.all.some((group) => group.tabs.length > 0);
+  if (looksLikeOurs() && !hasAnyEditors) {
+    vscode.commands.executeCommand("workbench.view.extension.vsInit");
   }
 
   let currentView;
@@ -2365,6 +2359,27 @@ function getGuidanceHtml(webview, extensionUri, hideWelcome) {
     deliberately decide to upgrade it.</p>
   </div>
 
+  <h2>The certs folder</h2>
+  <p>The <code>certs</code> folder visible in the Explorer (alongside your project folders) is
+  normally managed for you by the buttons above. If you already have certificate material from
+  somewhere else -- an existing enterprise certificate, or a CA your organization manages outside
+  this tool -- you can put it in place yourself instead of using Request Cert or Transfer Enterprise
+  Trust Anchors:</p>
+  <ul>
+    <li><code>certs/root/</code> -- trusted root/intermediate CA certificates, one <code>.pem</code>
+    file each. This whole folder becomes every container's trusted certificate list. Adding a
+    <code>.pem</code> file here yourself isn't enough on its own -- run <strong>Transfer Enterprise
+    Trust Anchors</strong> again afterward (it re-indexes the whole folder, including anything you
+    added by hand) so it actually gets trusted.</li>
+    <li><code>certs/live/&lt;host&gt;/</code> -- one folder per web address, containing
+    <code>fullchain.pem</code> and <code>privkey.pem</code> for that host's real serving
+    certificate (exact filenames matter). If you already have a certificate for a host, create this
+    folder and these two files yourself -- <strong>Build Caddyfile</strong> picks it up
+    automatically next time it runs, no need to involve Request Cert at all.</li>
+    <li><code>certs/requests/&lt;host&gt;/</code> -- working files for Request Cert/Retrieve Cert's
+    own process. Not meant to be populated by hand.</li>
+  </ul>
+
   <h2>Setting up a new deployment, roughly in order</h2>
   <ol>
     <li>If there's no caddy project yet, click <strong>Add Caddy</strong>.</li>
@@ -2514,7 +2529,6 @@ module.exports = {
   hostFromOrigin,
   liveCertPaths,
   buildCaddyfileText,
-  replaceInlineConfigContent,
   hostFromFrontendUrl,
   dumpValue,
   parseCertutilDump,

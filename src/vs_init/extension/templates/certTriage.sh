@@ -43,16 +43,31 @@ awk -v dir="$REQUEST_DIR" '
 ' "$BUNDLE"
 
 # First cert in the bundle is the leaf; everything after it is the
-# intermediate/root chain.
+# intermediate/root chain -- Windows CA chain responses typically
+# include the root itself, confirmed against a real chain (3 certs:
+# leaf, intermediate, self-signed root). A TLS server is only supposed
+# to present its leaf + intermediates, never the root (any real client
+# already has it in its own trust store; sending it too is redundant at
+# best, and RFC 8446 says not to) -- so the root is explicitly excluded
+# from both chain.pem and fullchain.pem here, identified by
+# self-signedness (issuer == subject) rather than assumed to be last,
+# in case a chain ever has more than one extra cert.
 cp "$REQUEST_DIR/.cert-1.pem" "$LIVE_DIR/cert.pem"
 
 : > "$LIVE_DIR/chain.pem"
 for f in "$REQUEST_DIR"/.cert-*.pem; do
     [ "$f" = "$REQUEST_DIR/.cert-1.pem" ] && continue
+    # -issuer/-subject print "issuer=..."/"subject=..." -- strip the
+    # label itself before comparing, or these never match even for a
+    # genuinely self-signed cert (caught live: compared equal to zero
+    # real self-signed certs until this was added).
+    issuer=$(openssl x509 -in "$f" -noout -issuer | sed 's/^issuer=//')
+    subject=$(openssl x509 -in "$f" -noout -subject | sed 's/^subject=//')
+    [ "$issuer" = "$subject" ] && continue
     cat "$f" >> "$LIVE_DIR/chain.pem"
 done
 
-cp "$BUNDLE" "$LIVE_DIR/fullchain.pem"
+cat "$LIVE_DIR/cert.pem" "$LIVE_DIR/chain.pem" > "$LIVE_DIR/fullchain.pem"
 cp "$REQUEST_DIR/privkey.pem" "$LIVE_DIR/privkey.pem"
 
 rm -f "$REQUEST_DIR"/.cert-*.pem "$BUNDLE"

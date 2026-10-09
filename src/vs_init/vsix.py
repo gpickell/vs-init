@@ -33,6 +33,10 @@ _CONTENT_TYPES = {
 # Only files an actual extension bundle needs ship inside extension/.
 _INCLUDE_SUFFIXES = {".js", ".json", ".html", ".css", ".png", ".svg", ".yml", ".yaml", ".sh"}
 
+# Extensionless files that still need bundling, matched by exact name
+# instead of suffix.
+_INCLUDE_NAMES = {"Caddyfile"}
+
 
 def _manifest_xml(manifest: dict) -> str:
     categories = ",".join(manifest.get("categories") or ["Other"])
@@ -85,9 +89,14 @@ def build_vsix(ext_dir: Path, out_path: Path) -> None:
     manifest = json.loads((ext_dir / "package.json").read_text(encoding="utf-8"))
     files = [
         p for p in ext_dir.rglob("*")
-        if p.is_file() and p.suffix in _INCLUDE_SUFFIXES and not p.name.startswith(".")
+        if p.is_file() and not p.name.startswith(".")
+        and (p.suffix in _INCLUDE_SUFFIXES or p.name in _INCLUDE_NAMES)
     ]
-    extensions = {p.suffix for p in files}
+    # Extensionless filenames (p.suffix == "") have no meaningful content
+    # type to declare and aren't suffix-addressed by anything that reads
+    # them anyway (plain fs.readFileSync from our own extension code) --
+    # excluded here rather than emitting a bogus `Extension=""` entry.
+    extensions = {p.suffix for p in files if p.suffix}
 
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", _content_types_xml(extensions))

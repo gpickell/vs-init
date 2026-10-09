@@ -64,7 +64,9 @@ studio_ready() {
         [ "$(stat -c '%G' "$STUDIO_PATH" 2>/dev/null)" = docker ] &&
         [ "$(stat -c '%A' "$STUDIO_PATH" 2>/dev/null | cut -c5-7)" = rws ] &&
         getfacl --omit-header "$STUDIO_PATH" 2>/dev/null | grep -qx 'default:group::rwx' &&
-        [ -f "$STUDIO_PATH/.vscode/settings.json" ]
+        [ -f "$STUDIO_PATH/.vscode/settings.json" ] &&
+        [ -d "$STUDIO_PATH/certs/root" ] &&
+        [ -d "$STUDIO_PATH/certs/live" ]
 }
 
 if [ "$FORCE" = 1 ] || ! studio_ready; then
@@ -87,6 +89,19 @@ if [ "$FORCE" = 1 ] || ! studio_ready; then
         '}' | sudo tee "$STUDIO_PATH/.vscode/settings.json" >/dev/null
     sudo chown -R ":docker" "$STUDIO_PATH/.vscode"
     sudo chmod g+w "$STUDIO_PATH/.vscode" "$STUDIO_PATH/.vscode/settings.json"
+
+    # Both caddy/compose.yml and studio/compose.yml bind-mount these as
+    # Docker volume sources (certs/root -> /etc/ssl/certs in both
+    # services, certs/live -> caddy's own path). If they don't already
+    # exist by the time `docker compose up` runs, Docker auto-creates
+    # them itself -- as plain root-owned directories, breaking the
+    # group-writable model the rest of this directory relies on (e.g.
+    # Transfer Enterprise Trust Anchors, running as this user, would get
+    # Permission Denied writing into a root-owned certs/root).
+    echo "Creating $STUDIO_PATH/certs/{root,live}..."
+    sudo mkdir -p "$STUDIO_PATH/certs/root" "$STUDIO_PATH/certs/live"
+    sudo chown -R ":docker" "$STUDIO_PATH/certs"
+    sudo chmod g+w "$STUDIO_PATH/certs" "$STUDIO_PATH/certs/root" "$STUDIO_PATH/certs/live"
     DID_SOMETHING=1
 fi
 
