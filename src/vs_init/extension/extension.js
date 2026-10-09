@@ -2086,6 +2086,16 @@ function activate(context) {
     vscode.commands.executeCommand("workbench.view.extension.vsInit");
   }
 
+  // Same one-time-at-activation timing as the two checks above. Errors
+  // (e.g. a read-only remote filesystem) are swallowed -- this is a
+  // nice-to-have for AI assistants, not something that should surface
+  // as a user-facing failure on every window open.
+  const initialFolders = vscode.workspace.workspaceFolders;
+  const initialStudioFolderUri = initialFolders && initialFolders[0] && initialFolders[0].uri;
+  if (looksLikeOurs() && initialStudioFolderUri) {
+    ensureClaudeMd(initialStudioFolderUri).catch(() => {});
+  }
+
   let currentView;
 
   async function refreshMainView() {
@@ -2164,6 +2174,170 @@ function activate(context) {
  * user reads once up front then occasionally refers back to, not
  * something that should compete for space with the side panel's own
  * project list. */
+// The substantive Guidance content (everything between the banner image
+// and the footer checkbox) -- kept as a real .html file under templates/
+// (not an inline template literal) for the same reason composeStubFor()
+// and certTriageScript() do the same thing: real syntax highlighting, no
+// JS-string-escaping to fight with. Also lets VENDOR.md (see
+// buildVendorMarkdown()) be generated from this exact same text instead
+// of maintaining a second hand-written copy for the AI to read. No
+// ${...} interpolation needed -- doesn't depend on hideWelcome, webview,
+// or extensionUri.
+const GUIDANCE_BODY_HTML = fs.readFileSync(path.join(__dirname, "templates", "guidance.html"), "utf8");
+/** Pure. Collapses a (possibly multi-line, hand-indented) chunk of text
+ * down to a single logical line -- used throughout htmlToMarkdown() so
+ * every block-level element's own content becomes one clean line
+ * instead of carrying over the source HTML's line-wrapping/indentation
+ * verbatim. */
+function collapseWhitespace(text) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/** Pure. Splits a <li>'s raw inner content into logical lines, joining
+ * hand-wrapped prose continuation lines back into one line each, while
+ * keeping already-bulleted lines (from a nested list already converted
+ * by htmlToMarkdown's own list pass, see below) on their own line --
+ * the one bit of structure that must NOT be collapsed away. */
+function joinProseLines(raw) {
+  const lines = raw.split("\n").map(collapseWhitespace).filter((line) => line !== "");
+  const joined = [];
+  for (const line of lines) {
+    const isBullet = /^(-|\d+\.)\s/.test(line);
+    const previousIsBullet = joined.length > 0 && /^(-|\d+\.)\s/.test(joined[joined.length - 1]);
+    if (!isBullet && joined.length > 0 && !previousIsBullet) {
+      joined[joined.length - 1] += ` ${line}`;
+    } else {
+      joined.push(line);
+    }
+  }
+  return joined;
+}
+
+/** Pure. Converts the small, controlled HTML subset GUIDANCE_BODY_HTML
+ * actually uses (p/h2/h3/ul/ol/li/strong/em/code/span/div, at most one
+ * level of list nesting) into plain Markdown -- not a general HTML-to-
+ * Markdown converter, just enough for this one piece of content,
+ * consistent with this project's preference for small purpose-built
+ * code over a new dependency (vsix.py's own packer instead of vsce,
+ * etc.). Used by buildVendorMarkdown() so the AI-facing doc is built
+ * from the exact same text a human sees in Guidance, rather than a
+ * second hand-maintained copy that could drift out of sync.
+ *
+ * List handling processes the innermost (no further nested <ul>/<ol>
+ * inside it) list first -- by the time an outer list's own <li> is
+ * processed, any list nested inside it has already been flattened to
+ * plain indented Markdown text, not raw tags. */
+function htmlToMarkdown(html) {
+  let text = html
+    .replace(/<strong>([\s\S]*?)<\/strong>/g, "**$1**")
+    .replace(/<em>([\s\S]*?)<\/em>/g, "*$1*")
+    .replace(/<code>([\s\S]*?)<\/code>/g, "`$1`");
+
+  const innermostListRe = /<(ul|ol)>((?:(?!<ul>|<ol>)[\s\S])*?)<\/\1>/;
+  let match;
+  while ((match = text.match(innermostListRe))) {
+    const [full, tag, inner] = match;
+    const items = [...inner.matchAll(/<li>([\s\S]*?)<\/li>/g)]
+      .map(([, liContent], i) => {
+        const bullet = tag === "ol" ? `${i + 1}.` : "-";
+        const [first, ...rest] = joinProseLines(liContent);
+        const indentedRest = rest.map((line) => `  ${line}`).join("\n");
+        return rest.length ? `${bullet} ${first}\n${indentedRest}` : `${bullet} ${first}`;
+      })
+      .join("\n");
+    text = `${text.slice(0, match.index)}\n${items}\n${text.slice(match.index + full.length)}`;
+  }
+
+  text = text
+    .replace(/<div class="cue">/g, "")
+    .replace(/<\/div>/g, "")
+    .replace(/<span class="where">([\s\S]*?)<\/span>/g, (_, inner) => `_${collapseWhitespace(inner)}_`)
+    .replace(/<h2>([\s\S]*?)<\/h2>/g, (_, inner) => `\n## ${collapseWhitespace(inner)}\n`)
+    .replace(/<h3>([\s\S]*?)<\/h3>/g, (_, inner) => `\n### ${collapseWhitespace(inner)}\n`)
+    .replace(/<p>([\s\S]*?)<\/p>/g, (_, inner) => `\n${collapseWhitespace(inner)}\n`);
+
+  text = text
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      const isNestedBullet = /^(-|\d+\.)\s/.test(trimmed) && /^\s{2,}/.test(line);
+      return isNestedBullet ? `  ${trimmed}` : trimmed;
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n");
+
+  return text
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/&#96;/g, "`")
+    .trim();
+}
+
+// AI-specific guardrails that have no equivalent in the (human-facing)
+// Guidance screen -- combined with htmlToMarkdown(GUIDANCE_BODY_HTML) in
+// buildVendorMarkdown() to form the complete .vs-init/VENDOR.md content.
+// Kept as a real .md file under templates/ for the same reason
+// GUIDANCE_BODY_HTML is -- see its own comment above.
+const VENDOR_MD_AI_NOTES = fs.readFileSync(path.join(__dirname, "templates", "vendor-ai-notes.md"), "utf8");
+
+/** Assembles .vs-init/VENDOR.md's full text: the AI-specific notes above,
+ * followed by the Guidance screen's own content converted to Markdown --
+ * regenerated every activation (see ensureClaudeMd()) so an improvement
+ * to Guidance's wording automatically flows through here too, without
+ * maintaining two copies by hand. */
+function buildVendorMarkdown() {
+  return `# VertiGIS Studio Deployment -- AI Assistant Reference
+
+This file is generated automatically by the vs-init VS Code extension every time it starts. Do not
+hand-edit it -- changes will be overwritten the next time this workspace is opened. Add your own
+notes to ../CLAUDE.md instead, above its own separator line; that file is only ever written once
+and never touched again after that.
+
+${VENDOR_MD_AI_NOTES}
+
+## The rest of this file mirrors the Guidance screen
+
+Everything below is generated from the exact same source text as the **Guidance** screen shown
+inside VS Code (side panel button, or the command that reopens it) -- if it looks outdated, that's
+a bug in vs-init, not something to fix by hand here.
+
+${htmlToMarkdown(GUIDANCE_BODY_HTML)}
+`;
+}
+
+// Kept as a real .md file under templates/ for the same reason
+// GUIDANCE_BODY_HTML is -- see its own comment above.
+const CLAUDE_MD_STUB = fs.readFileSync(path.join(__dirname, "templates", "claude-stub.md"), "utf8");
+
+/** Writes CLAUDE.md at the workspace root only if it doesn't already
+ * exist (so a user's own edits below its separator line are never
+ * clobbered), and unconditionally (re)writes .vs-init/VENDOR.md with
+ * freshly generated content every time this runs. Called once per
+ * activation (see the one-time block in activate(), alongside the
+ * Guidance/side-panel auto-show checks) -- not from refreshGating(),
+ * which can re-fire within the same window session (e.g. a workspace-
+ * folder change) and shouldn't retrigger this. */
+async function ensureClaudeMd(studioFolderUri) {
+  const claudeMdUri = vscode.Uri.joinPath(studioFolderUri, "CLAUDE.md");
+  let claudeMdExists = true;
+  try {
+    await vscode.workspace.fs.stat(claudeMdUri);
+  } catch {
+    claudeMdExists = false;
+  }
+  if (!claudeMdExists) {
+    await vscode.workspace.fs.writeFile(claudeMdUri, Buffer.from(CLAUDE_MD_STUB, "utf8"));
+  }
+
+  const vendorMdUri = vscode.Uri.joinPath(studioFolderUri, ".vs-init", "VENDOR.md");
+  await vscode.workspace.fs.writeFile(vendorMdUri, Buffer.from(buildVendorMarkdown(), "utf8"));
+}
+
+// Kept as a real .css file under templates/ for the same reason
+// GUIDANCE_BODY_HTML is -- see its own comment above.
+const GUIDANCE_CSS = fs.readFileSync(path.join(__dirname, "templates", "guidance.css"), "utf8");
+
 function getGuidanceHtml(webview, extensionUri, hideWelcome) {
   const bannerUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "banner.svg"));
 
@@ -2171,232 +2345,13 @@ function getGuidanceHtml(webview, extensionUri, hideWelcome) {
 <html>
 <head>
 <style>
-  body {
-    margin: 0;
-    padding: 1.5rem 2rem 3rem;
-    max-width: 50rem;
-    background: var(--vscode-editor-background);
-    color: var(--vscode-editor-foreground);
-    font-family: var(--vscode-font-family);
-    line-height: 1.5;
-  }
-  img.banner {
-    width: 100%;
-    max-width: 28rem;
-    height: auto;
-    margin-bottom: 0.5rem;
-  }
-  h1 { font-size: 1.4em; margin: 1.5rem 0 0.5rem; }
-  h2 {
-    font-size: 1.15em;
-    margin: 2rem 0 0.5rem;
-    padding-bottom: 0.25rem;
-    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-  }
-  h3 { font-size: 1em; margin: 1.25rem 0 0.4rem; }
-  p { margin: 0.5rem 0; }
-  code {
-    background: var(--vscode-textCodeBlock-background);
-    padding: 0.1rem 0.3rem;
-    border-radius: 3px;
-    font-family: var(--vscode-editor-font-family, monospace);
-  }
-  ol, ul { padding-left: 1.4rem; }
-  li { margin-bottom: 0.4rem; }
-  .cue {
-    border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-    border-radius: 6px;
-    padding: 0.75rem 1rem;
-    margin: 0.75rem 0;
-  }
-  .cue h3 { margin-top: 0; }
-  .cue .where {
-    display: inline-block;
-    font-size: 0.85em;
-    opacity: 0.75;
-    margin-bottom: 0.35rem;
-  }
-  .footer {
-    margin-top: 2.5rem;
-    padding-top: 1rem;
-    border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.9em;
-    opacity: 0.85;
-  }
+${GUIDANCE_CSS}
 </style>
 </head>
 <body>
   <img class="banner" src="${bannerUri}" alt="VertiGIS Studio" />
 
-  <p>This Windows machine is set up to manage a <strong>VertiGIS Studio</strong> deployment that
-  actually <em>runs</em> somewhere else: a separate Linux server, using Docker. You don't need to
-  become a Linux person to use it -- this page explains the handful of concepts that matter and
-  what each button in this extension actually does.</p>
-
-  <h2>What you're looking at</h2>
-  <p>This VS Code window is connected directly to that Linux server over SSH (that's what "Remote
-  (SSH)" in the bottom-left corner means). When you open or edit a file here, you're editing the
-  real file <em>on the server</em>, immediately -- there's no separate upload step, no syncing.
-  Closing this window doesn't undo anything you've already saved.</p>
-  <p>Everything lives under one folder on that server: <code>/opt/vertigis-studio</code>. That's
-  the folder this window has open.</p>
-
-  <h2>Projects and compose.yml</h2>
-  <p>Inside <code>/opt/vertigis-studio</code>, each subfolder is a <strong>project</strong> --
-  one self-contained thing that Docker runs. You'll typically have:</p>
-  <ul>
-    <li><strong>A caddy project</strong> (named <code>caddy</code> or <code>caddy-1</code>) -- the
-    "front door." It's what actually receives web traffic from the internet/your network and
-    forwards it to the right place, and it's what handles HTTPS.</li>
-    <li><strong>One or more studio projects</strong> (<code>studio-1</code>, <code>studio-2</code>,
-    ...) -- each one is a running copy of VertiGIS Studio itself.</li>
-  </ul>
-  <p>Every project has a <code>compose.yml</code> file -- that's the file that tells Docker what to
-  run and how to configure it. You don't need to understand Docker Compose as a format to use this
-  extension; just know that:</p>
-  <ul>
-    <li>A line like <code>environment:</code> introduces a list of settings, one per line below it,
-    each shaped like <code>SETTING_NAME: value</code>. Changing the deployment's behavior almost
-    always just means changing the text after one of these colons.</li>
-    <li>A line starting with <code>#</code> is a comment -- a note for humans, Docker ignores it.
-    Some of those comments are what make the buttons described below show up.</li>
-  </ul>
-
-  <h2>The side panel</h2>
-  <p>Open it from the VertiGIS Studio icon in the Activity Bar (the strip of icons on the far
-  left). It has:</p>
-  <ul>
-    <li><strong>Add Caddy</strong> / <strong>Add Studio</strong> -- create a new project folder
-    with a ready-to-edit <code>compose.yml</code> already in it.</li>
-    <li><strong>Compose Projects</strong> -- every existing project, as a clickable list that jumps
-    straight to its <code>compose.yml</code>.</li>
-    <li><strong>Guidance</strong> -- brings you back to this page any time.</li>
-  </ul>
-
-  <h2>The buttons that appear inside compose.yml</h2>
-  <p>Open any project's <code>compose.yml</code> and you'll see small clickable links (VS Code
-  calls these "CodeLens") floating just above certain lines. Each one runs a real action -- most of
-  them open a terminal-like panel at the bottom (named <strong>vs-init</strong>) so you can watch
-  what's happening; that panel is reused for whatever you click most recently, not one per action.</p>
-
-  <div class="cue">
-    <span class="where">Appears above: the <code>environment:</code> line, for a studio project</span>
-    <h3>Get Account ID</h3>
-    <p>Opens your web browser so you can sign in and confirm which VertiGIS Studio account this
-    deployment belongs to. Fills in <code>VERTIGIS_ACCOUNT_ID</code> for you -- you never have to
-    go look that value up yourself.</p>
-  </div>
-
-  <div class="cue">
-    <span class="where">Appears above: the <code>environment:</code> line, for a studio project</span>
-    <h3>Register App / Update App</h3>
-    <p>Your organization's ArcGIS/Portal sign-in needs to know about this specific deployment
-    before users can log into it. Clicking this opens a browser window for you to sign in to your
-    portal, then registers (or updates) an application entry there automatically and fills in
-    <code>ARCGIS_APP_ID</code>. <strong>Register App</strong> always stays available even after
-    you've already registered once -- clicking it again just creates a fresh registration, which is
-    sometimes exactly what you want (e.g. starting over cleanly); <strong>Update App</strong> only
-    appears once there's already an app id, and just refreshes its settings instead of creating a
-    new one.</p>
-  </div>
-
-  <div class="cue">
-    <span class="where">Appears above: the <code>environment:</code> line, for a studio project</span>
-    <h3>Request Cert / Retrieve Cert</h3>
-    <p>If your organization has its own internal certificate authority (common for anything not
-    meant to be public on the internet), this requests a real HTTPS certificate for this
-    deployment's web address from it, using your Windows machine's own certificate tools -- you may
-    see an administrator-approval prompt, since issuing a certificate needs that. Some certificate
-    authorities issue immediately; others take a moment to approve the request first. If
-    <strong>Request Cert</strong> reports the certificate isn't ready yet, run <strong>Retrieve
-    Cert</strong> afterward (any time) to pick it up once it is -- re-running either one is always
-    safe.</p>
-  </div>
-
-  <div class="cue">
-    <span class="where">Appears above: the <code>environment:</code> line, for a studio project</span>
-    <h3>Register CNAME</h3>
-    <p>Tries to automatically point your organization's internal DNS at this server, so people can
-    actually reach this deployment by name. This is best-effort by design: it only works if your
-    network's DNS is set up in a fairly standard way, and it will clearly tell you if it couldn't
-    figure out where to make the change rather than guessing. If it doesn't work, that's expected
-    for some networks -- ask whoever manages DNS at your organization to point the name at this
-    server manually instead.</p>
-  </div>
-
-  <div class="cue">
-    <span class="where">Appears above: the top of the file, for a studio project (it's file-wide,
-    like Build Caddyfile, not tied to one specific line)</span>
-    <h3>Transfer Enterprise Trust Anchors</h3>
-    <p>If your organization uses its own internal certificate authority (see Request Cert above),
-    the Linux server also needs to be told to trust it -- otherwise it won't trust its own
-    certificate, or anything else signed by your organization. This copies your Windows machine's
-    own list of trusted certificates to the server. Safe to re-run any time (e.g. after your IT
-    department rolls out a new certificate authority).</p>
-  </div>
-
-  <div class="cue">
-    <span class="where">Appears above: the top of the file, for any project with "# caddy" cues
-    (including the caddy project's own compose.yml)</span>
-    <h3>Build Caddyfile</h3>
-    <p>Looks across <em>every</em> project for two specific comments -- <code># caddy route
-    url</code> and <code># caddy route target</code> -- and wires them all together into the caddy
-    project's own configuration, so the front door actually knows how to reach each studio
-    deployment. Run this again any time you add a new studio project or change a web address. It
-    also automatically picks up a real certificate for a deployment (see Request Cert above) if one
-    exists -- nothing to configure separately for that.</p>
-  </div>
-
-  <div class="cue">
-    <span class="where">Appears above: any <code>image:</code> line</span>
-    <h3>Pick Version</h3>
-    <p>Shows every real released version of that image (VertiGIS Studio, or Caddy) actually
-    available right now, newest first, and lets you pin this project to a specific one instead of
-    always using <code>latest</code>. Useful when you want this deployment to stop moving until you
-    deliberately decide to upgrade it.</p>
-  </div>
-
-  <h2>The certs folder</h2>
-  <p>The <code>certs</code> folder visible in the Explorer (alongside your project folders) is
-  normally managed for you by the buttons above. If you already have certificate material from
-  somewhere else -- an existing enterprise certificate, or a CA your organization manages outside
-  this tool -- you can put it in place yourself instead of using Request Cert or Transfer Enterprise
-  Trust Anchors:</p>
-  <ul>
-    <li><code>certs/root/</code> -- trusted root/intermediate CA certificates, one <code>.pem</code>
-    file each. This whole folder becomes every container's trusted certificate list. Adding a
-    <code>.pem</code> file here yourself isn't enough on its own -- run <strong>Transfer Enterprise
-    Trust Anchors</strong> again afterward (it re-indexes the whole folder, including anything you
-    added by hand) so it actually gets trusted.</li>
-    <li><code>certs/live/&lt;host&gt;/</code> -- one folder per web address, containing
-    <code>fullchain.pem</code> and <code>privkey.pem</code> for that host's real serving
-    certificate (exact filenames matter). If you already have a certificate for a host, create this
-    folder and these two files yourself -- <strong>Build Caddyfile</strong> picks it up
-    automatically next time it runs, no need to involve Request Cert at all.</li>
-    <li><code>certs/requests/&lt;host&gt;/</code> -- working files for Request Cert/Retrieve Cert's
-    own process. Not meant to be populated by hand.</li>
-  </ul>
-
-  <h2>Setting up a new deployment, roughly in order</h2>
-  <ol>
-    <li>If there's no caddy project yet, click <strong>Add Caddy</strong>.</li>
-    <li>Click <strong>Add Studio</strong> to create a new studio project.</li>
-    <li>Open its <code>compose.yml</code> and fill in <code>ARCGIS_PORTAL_URL</code> and the
-    <code># caddy route url</code>/<code>FRONTEND_URL</code> value (the web address people will
-    actually use to reach it).</li>
-    <li>Click <strong>Get Account ID</strong>, then <strong>Register App</strong>.</li>
-    <li>If your organization uses an internal certificate authority: click <strong>Transfer
-    Enterprise Trust Anchors</strong> once per server, then <strong>Request Cert</strong> for this
-    deployment (and <strong>Retrieve Cert</strong> later if needed).</li>
-    <li>Click <strong>Build Caddyfile</strong> to wire the front door up to this deployment.</li>
-    <li>Optionally, click <strong>Register CNAME</strong> to try to point DNS here automatically.</li>
-    <li>Start the containers: the Docker/Container Tools extensions already installed in this
-    window can do this from their own panel, or run <code>docker compose up -d</code> in a terminal
-    opened in the project's own folder.</li>
-  </ol>
+${GUIDANCE_BODY_HTML}
 
   <div class="footer">
     <label>
@@ -2529,6 +2484,8 @@ module.exports = {
   hostFromOrigin,
   liveCertPaths,
   buildCaddyfileText,
+  htmlToMarkdown,
+  buildVendorMarkdown,
   hostFromFrontendUrl,
   dumpValue,
   parseCertutilDump,

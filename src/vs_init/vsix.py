@@ -27,11 +27,12 @@ _CONTENT_TYPES = {
     ".yml": "application/x-yaml",
     ".yaml": "application/x-yaml",
     ".sh": "application/x-sh",
+    ".md": "text/markdown",
     ".vsixmanifest": "text/xml",
 }
 
 # Only files an actual extension bundle needs ship inside extension/.
-_INCLUDE_SUFFIXES = {".js", ".json", ".html", ".css", ".png", ".svg", ".yml", ".yaml", ".sh"}
+_INCLUDE_SUFFIXES = {".js", ".json", ".html", ".css", ".png", ".svg", ".yml", ".yaml", ".sh", ".md"}
 
 # Extensionless files that still need bundling, matched by exact name
 # instead of suffix.

@@ -143,6 +143,43 @@ UI:
   reopen, so their absence suggests nothing carried over from a prior session). Deliberately NOT
   gated on vsInit.hideWelcome -- unlike Guidance, there's no other affordance that ever points the
   user at the side panel, so it doesn't share Guidance's opt-out.
+- CLAUDE.md / .vs-init/VENDOR.md (DONE): informs AI assistants (Claude Code, GitHub Copilot Chat,
+  etc.) working in this workspace, the same way Guidance informs a human -- without a new "live
+  tool" subsystem (considered and deliberately not built yet: VS Code's `vscode.lm.registerTool`
+  only reaches Copilot Chat/VS Code's own Agents window, not Claude Code, which doesn't consume
+  `vscode.lm` at all; reaching Claude Code specifically would need a real MCP server, a much bigger
+  piece of infrastructure than this project's scope right now). Split into two files, one per
+  ownership model:
+  - `CLAUDE.md` at the workspace root: written once, only if it doesn't already exist
+    (ensureClaudeMd()) -- a short stub pointing at `.vs-init/VENDOR.md`, plus a separator line.
+    Never touched again after that first write, so anything the user adds below the separator
+    survives every future vs-init/extension update untouched.
+  - `.vs-init/VENDOR.md`: unconditionally regenerated every activation (not from refreshGating(),
+    which can re-fire within one window session -- same one-time-per-activation timing as the
+    Guidance/side-panel checks above). Built from AI-specific guardrails (never read privkey.pem,
+    never fabricate VERTIGIS_ACCOUNT_ID/ARCGIS_APP_ID, don't hand-edit certs/requests/, correct
+    cert.pem/chain.pem/fullchain.pem semantics, etc.) followed by htmlToMarkdown(GUIDANCE_BODY_HTML)
+    -- the exact same source text as the Guidance screen, converted to plain Markdown, so an
+    improvement to Guidance's wording automatically flows through here too instead of maintaining a
+    second hand-written copy that could drift out of sync.
+  - Naming note: this `.vs-init/` is a plain folder inside the deployment on the remote Linux host,
+    unrelated to the Windows-side `~/.vs-init` settings directory the bootstrap CLI uses (settings.py)
+    -- same name, different machine, different purpose. CLAUDE.md itself says so, for anyone reading
+    it without this context.
+  - htmlToMarkdown() is a small purpose-built converter for the specific HTML subset
+    GUIDANCE_BODY_HTML uses (p/h2/h3/ul/ol/li/strong/em/code/span/div, at most one level of list
+    nesting) -- not a general HTML-to-Markdown library, consistent with this project's preference
+    for small purpose-built code over a new dependency (vsix.py's own VSIX packer instead of vsce,
+    etc.). Handles nested lists (the "Start the containers" checklist item) by converting the
+    innermost list first, so by the time an outer list's own `<li>` is processed, anything nested
+    inside it is already flattened to plain indented Markdown text rather than raw tags.
+  - GUIDANCE_BODY_HTML (and the Guidance screen's CSS, and both AI-facing Markdown templates) were
+    pulled out of extension.js into real files under templates/ (guidance.html, guidance.css,
+    vendor-ai-notes.md, claude-stub.md), loaded via `fs.readFileSync` -- same rationale as
+    composeStubFor()/certTriageScript() already using that pattern: real syntax highlighting, no
+    JS-string-escaping to fight with. vsix.py's bundling filter needed `.md` added to
+    `_INCLUDE_SUFFIXES`/`_CONTENT_TYPES` for this -- caught proactively this time, having already
+    hit the exact same silent-exclusion bug once for the extensionless `Caddyfile` template.
 - compose.yml Code Lens
   - Cue: any "# caddy" comment, anywhere in the file -- OR the file structurally looks like a
     caddy project's own compose.yml (a caddy image, plus an inline "content: |" config block --

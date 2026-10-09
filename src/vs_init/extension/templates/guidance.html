@@ -1,0 +1,176 @@
+
+  <p>This Windows machine is set up to manage a <strong>VertiGIS Studio</strong> deployment that
+  actually <em>runs</em> somewhere else: a separate Linux server, using Docker. You don't need to
+  become a Linux person to use it -- this page explains the handful of concepts that matter and
+  what each button in this extension actually does.</p>
+
+  <h2>What you're looking at</h2>
+  <p>This VS Code window is connected directly to that Linux server over SSH (that's what "Remote
+  (SSH)" in the bottom-left corner means). When you open or edit a file here, you're editing the
+  real file <em>on the server</em>, immediately -- there's no separate upload step, no syncing.
+  Closing this window doesn't undo anything you've already saved.</p>
+  <p>Everything lives under one folder on that server: <code>/opt/vertigis-studio</code>. That's
+  the folder this window has open.</p>
+
+  <h2>Projects and compose.yml</h2>
+  <p>Inside <code>/opt/vertigis-studio</code>, each subfolder is a <strong>project</strong> --
+  one self-contained thing that Docker runs. You'll typically have:</p>
+  <ul>
+    <li><strong>A caddy project</strong> (named <code>caddy</code> or <code>caddy-1</code>) -- the
+    "front door." It's what actually receives web traffic from the internet/your network and
+    forwards it to the right place, and it's what handles HTTPS.</li>
+    <li><strong>One or more studio projects</strong> (<code>studio-1</code>, <code>studio-2</code>,
+    ...) -- each one is a running copy of VertiGIS Studio itself.</li>
+  </ul>
+  <p>Every project has a <code>compose.yml</code> file -- that's the file that tells Docker what to
+  run and how to configure it. You don't need to understand Docker Compose as a format to use this
+  extension; just know that:</p>
+  <ul>
+    <li>A line like <code>environment:</code> introduces a list of settings, one per line below it,
+    each shaped like <code>SETTING_NAME: value</code>. Changing the deployment's behavior almost
+    always just means changing the text after one of these colons.</li>
+    <li>A line starting with <code>#</code> is a comment -- a note for humans, Docker ignores it.
+    Some of those comments are what make the buttons described below show up.</li>
+  </ul>
+
+  <h2>The side panel</h2>
+  <p>Open it from the VertiGIS Studio icon in the Activity Bar (the strip of icons on the far
+  left). It has:</p>
+  <ul>
+    <li><strong>Add Caddy</strong> / <strong>Add Studio</strong> -- create a new project folder
+    with a ready-to-edit <code>compose.yml</code> already in it.</li>
+    <li><strong>Compose Projects</strong> -- every existing project, as a clickable list that jumps
+    straight to its <code>compose.yml</code>.</li>
+    <li><strong>Guidance</strong> -- brings you back to this page any time.</li>
+  </ul>
+
+  <h2>The buttons that appear inside compose.yml</h2>
+  <p>Open any project's <code>compose.yml</code> and you'll see small clickable links (VS Code
+  calls these "CodeLens") floating just above certain lines. Each one runs a real action -- most of
+  them open a terminal-like panel at the bottom (named <strong>vs-init</strong>) so you can watch
+  what's happening; that panel is reused for whatever you click most recently, not one per action.</p>
+
+  <div class="cue">
+    <span class="where">Appears above: the <code>environment:</code> line, for a studio project</span>
+    <h3>Get Account ID</h3>
+    <p>Opens your web browser so you can sign in and confirm which VertiGIS Studio account this
+    deployment belongs to. Fills in <code>VERTIGIS_ACCOUNT_ID</code> for you -- you never have to
+    go look that value up yourself.</p>
+  </div>
+
+  <div class="cue">
+    <span class="where">Appears above: the <code>environment:</code> line, for a studio project</span>
+    <h3>Register App / Update App</h3>
+    <p>Your organization's ArcGIS/Portal sign-in needs to know about this specific deployment
+    before users can log into it. Clicking this opens a browser window for you to sign in to your
+    portal, then registers (or updates) an application entry there automatically and fills in
+    <code>ARCGIS_APP_ID</code>. <strong>Register App</strong> always stays available even after
+    you've already registered once -- clicking it again just creates a fresh registration, which is
+    sometimes exactly what you want (e.g. starting over cleanly); <strong>Update App</strong> only
+    appears once there's already an app id, and just refreshes its settings instead of creating a
+    new one.</p>
+  </div>
+
+  <div class="cue">
+    <span class="where">Appears above: the <code>environment:</code> line, for a studio project</span>
+    <h3>Request Cert / Retrieve Cert</h3>
+    <p>If your organization has its own internal certificate authority (common for anything not
+    meant to be public on the internet), this requests a real HTTPS certificate for this
+    deployment's web address from it, using your Windows machine's own certificate tools -- you may
+    see an administrator-approval prompt, since issuing a certificate needs that. Some certificate
+    authorities issue immediately; others take a moment to approve the request first. If
+    <strong>Request Cert</strong> reports the certificate isn't ready yet, run <strong>Retrieve
+    Cert</strong> afterward (any time) to pick it up once it is -- re-running either one is always
+    safe.</p>
+  </div>
+
+  <div class="cue">
+    <span class="where">Appears above: the <code>environment:</code> line, for a studio project</span>
+    <h3>Register CNAME</h3>
+    <p>Tries to automatically point your organization's internal DNS at this server, so people can
+    actually reach this deployment by name. This is best-effort by design: it only works if your
+    network's DNS is set up in a fairly standard way, and it will clearly tell you if it couldn't
+    figure out where to make the change rather than guessing. If it doesn't work, that's expected
+    for some networks -- ask whoever manages DNS at your organization to point the name at this
+    server manually instead.</p>
+  </div>
+
+  <div class="cue">
+    <span class="where">Appears above: the top of the file, for a studio project (it's file-wide,
+    like Build Caddyfile, not tied to one specific line)</span>
+    <h3>Transfer Enterprise Trust Anchors</h3>
+    <p>If your organization uses its own internal certificate authority (see Request Cert above),
+    the Linux server also needs to be told to trust it -- otherwise it won't trust its own
+    certificate, or anything else signed by your organization. This copies your Windows machine's
+    own list of trusted certificates to the server. Safe to re-run any time (e.g. after your IT
+    department rolls out a new certificate authority).</p>
+  </div>
+
+  <div class="cue">
+    <span class="where">Appears above: the top of the file, for any project with "# caddy" cues
+    (including the caddy project's own compose.yml)</span>
+    <h3>Build Caddyfile</h3>
+    <p>Looks across <em>every</em> project for two specific comments -- <code># caddy route
+    url</code> and <code># caddy route target</code> -- and wires them all together into the caddy
+    project's own configuration, so the front door actually knows how to reach each studio
+    deployment. Run this again any time you add a new studio project or change a web address. It
+    also automatically picks up a real certificate for a deployment (see Request Cert above) if one
+    exists -- nothing to configure separately for that.</p>
+  </div>
+
+  <div class="cue">
+    <span class="where">Appears above: any <code>image:</code> line</span>
+    <h3>Pick Version</h3>
+    <p>Shows every real released version of that image (VertiGIS Studio, or Caddy) actually
+    available right now, newest first, and lets you pin this project to a specific one instead of
+    always using <code>latest</code>. Useful when you want this deployment to stop moving until you
+    deliberately decide to upgrade it.</p>
+  </div>
+
+  <h2>The certs folder</h2>
+  <p>The <code>certs</code> folder visible in the Explorer (alongside your project folders) is
+  normally managed for you by the buttons above. If you already have certificate material from
+  somewhere else -- an existing enterprise certificate, or a CA your organization manages outside
+  this tool -- you can put it in place yourself instead of using Request Cert or Transfer Enterprise
+  Trust Anchors:</p>
+  <ul>
+    <li><code>certs/root/</code> -- trusted root/intermediate CA certificates, one <code>.pem</code>
+    file each. This whole folder becomes every container's trusted certificate list. Adding a
+    <code>.pem</code> file here yourself isn't enough on its own -- run <strong>Transfer Enterprise
+    Trust Anchors</strong> again afterward (it re-indexes the whole folder, including anything you
+    added by hand) so it actually gets trusted.</li>
+    <li><code>certs/live/&lt;host&gt;/</code> -- one folder per web address, containing
+    <code>fullchain.pem</code> and <code>privkey.pem</code> for that host's real serving
+    certificate (exact filenames matter). If you already have a certificate for a host, create this
+    folder and these two files yourself -- <strong>Build Caddyfile</strong> picks it up
+    automatically next time it runs, no need to involve Request Cert at all.</li>
+    <li><code>certs/requests/&lt;host&gt;/</code> -- working files for Request Cert/Retrieve Cert's
+    own process. Not meant to be populated by hand.</li>
+  </ul>
+
+  <h2>Setting up a new deployment, roughly in order</h2>
+  <ol>
+    <li>If there's no caddy project yet, click <strong>Add Caddy</strong>.</li>
+    <li>Click <strong>Add Studio</strong> to create a new studio project.</li>
+    <li>Open its <code>compose.yml</code> and fill in <code>ARCGIS_PORTAL_URL</code> and the
+    <code># caddy route url</code>/<code>FRONTEND_URL</code> value (the web address people will
+    actually use to reach it).</li>
+    <li>Click <strong>Get Account ID</strong>, then <strong>Register App</strong>.</li>
+    <li>If your organization uses an internal certificate authority: click <strong>Transfer
+    Enterprise Trust Anchors</strong> once per server, then <strong>Request Cert</strong> for this
+    deployment (and <strong>Retrieve Cert</strong> later if needed).</li>
+    <li>Click <strong>Build Caddyfile</strong> to wire the front door up to this deployment.</li>
+    <li>Optionally, click <strong>Register CNAME</strong> to try to point DNS here automatically.</li>
+    <li>Start the containers. Two equivalent ways to do this:
+      <ul>
+        <li>Open the project's <code>compose.yml</code> and look for <strong>Run Services</strong>
+        just above the <code>services:</code> line -- that's a CodeLens from the Container Tools
+        extension already installed in this window, not one of vs-init's own buttons.</li>
+        <li>Or the same steps from a shell instead: right-click the project's folder in the
+        Explorer and choose <strong>Open in Integrated Terminal</strong> (lands you in the right
+        folder automatically), or bring up any terminal via <strong>Terminal &gt; New
+        Terminal</strong> (or <code>Ctrl+&#96;</code>) and <code>cd</code> into the project's folder
+        yourself -- then run <code>docker compose up -d</code>.</li>
+      </ul>
+    </li>
+  </ol>

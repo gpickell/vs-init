@@ -1,0 +1,55 @@
+  body {
+    margin: 0;
+    padding: 1.5rem 2rem 3rem;
+    max-width: 50rem;
+    background: var(--vscode-editor-background);
+    color: var(--vscode-editor-foreground);
+    font-family: var(--vscode-font-family);
+    line-height: 1.5;
+  }
+  img.banner {
+    width: 100%;
+    max-width: 28rem;
+    height: auto;
+    margin-bottom: 0.5rem;
+  }
+  h1 { font-size: 1.4em; margin: 1.5rem 0 0.5rem; }
+  h2 {
+    font-size: 1.15em;
+    margin: 2rem 0 0.5rem;
+    padding-bottom: 0.25rem;
+    border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  }
+  h3 { font-size: 1em; margin: 1.25rem 0 0.4rem; }
+  p { margin: 0.5rem 0; }
+  code {
+    background: var(--vscode-textCodeBlock-background);
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    font-family: var(--vscode-editor-font-family, monospace);
+  }
+  ol, ul { padding-left: 1.4rem; }
+  li { margin-bottom: 0.4rem; }
+  .cue {
+    border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    margin: 0.75rem 0;
+  }
+  .cue h3 { margin-top: 0; }
+  .cue .where {
+    display: inline-block;
+    font-size: 0.85em;
+    opacity: 0.75;
+    margin-bottom: 0.35rem;
+  }
+  .footer {
+    margin-top: 2.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9em;
+    opacity: 0.85;
+  }
